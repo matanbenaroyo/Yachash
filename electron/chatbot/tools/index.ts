@@ -9,6 +9,11 @@ import { randomUUID } from 'crypto';
 import type { ChatbotTool, ToolResult, WorkflowContext } from '../types';
 import { KnowledgeService } from '../knowledge/KnowledgeService';
 import { resolveStaffPhone } from '../config';
+import {
+  VEHICLE_ENTRY_FORMAT,
+  parseVehicleEntryForm,
+  renderVehicleEntryForm,
+} from '../workflows/vehicleEntryFormat';
 
 function knowledge(ctx: WorkflowContext) {
   return new KnowledgeService(ctx.db);
@@ -162,22 +167,32 @@ const searchOpenCalls: ChatbotTool = {
   },
 };
 
+const getVehicleEntryFormat: ChatbotTool = {
+  name: 'getVehicleEntryFormat',
+  description:
+    'Returns the official vehicle-entry form (פורמט אישור כניסה) that the user must fill in. ' +
+    'Call this as soon as someone asks for entry authorization to קסטינה, and send the returned ' +
+    'text to the user EXACTLY as-is — do not reword it, reorder it, or add/remove fields.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: () => ({ ok: true, data: { format: VEHICLE_ENTRY_FORMAT } }),
+};
+
 const sendVehicleEntryRequest: ChatbotTool = {
   name: 'sendVehicleEntryRequest',
   description:
-    'Submit a completed vehicle-entry authorization request to the designated staff member over WhatsApp. ' +
-    'Only call this once every required field is known. Returns ok:false if it could not be delivered.',
+    'Forwards a FILLED vehicle-entry form to the designated staff member over WhatsApp. ' +
+    'Pass the full text the user sent, verbatim, as filledForm. The form is validated here: if ' +
+    'mandatory fields are blank this returns ok:false listing them, and nothing is sent — in that ' +
+    'case ask the user only for the fields named in the response.',
   input_schema: {
     type: 'object',
     properties: {
-      fullName: { type: 'string' },
-      vehicleNumber: { type: 'string' },
-      date: { type: 'string', description: 'Resolved date, yyyy-mm-dd' },
-      time: { type: 'string', description: 'HH:MM' },
-      unit: { type: 'string', description: 'יחידה / מסגרת' },
-      reason: { type: 'string', description: 'סיבת כניסה' },
+      filledForm: {
+        type: 'string',
+        description: "The complete filled form exactly as the user sent it",
+      },
     },
-    required: ['fullName', 'vehicleNumber', 'date', 'time'],
+    required: ['filledForm'],
   },
   execute: async (input, ctx) => submitVehicleEntry(input, ctx),
 };
@@ -274,21 +289,37 @@ const sendMessageToStaff: ChatbotTool = {
   },
 };
 
-/** Shared by the tool and by the vehicle-entry workflow's completion step. */
+/**
+ * Validates and forwards a filled vehicle-entry form.
+ *
+ * Completeness is checked HERE, not by the model: a form missing mandatory
+ * fields is never forwarded, and the caller is told exactly which fields to
+ * ask for. That keeps a half-filled request from reaching staff.
+ */
 export async function submitVehicleEntry(
   input: Record<string, any>,
   ctx: WorkflowContext,
 ): Promise<ToolResult> {
+  const filledForm = String(input.filledForm ?? '').trim();
+  if (!filledForm) {
+    return { ok: false, error: 'לא התקבל פורמט מלא. שלח למשתמש את הפורמט וחכה שימלא אותו.' };
+  }
+
+  const parsed = parseVehicleEntryForm(filledForm);
+  if (!parsed.complete) {
+    return {
+      ok: false,
+      error: `הפורמט לא מלא. חסרים השדות הבאים: ${parsed.missing.join(', ')}. בקש מהמשתמש רק אותם.`,
+      data: { missingFields: parsed.missing },
+    };
+  }
+
   const to = resolveStaffPhone(ctx.config, 'vehicle');
   const body =
-    `בקשת אישור כניסת רכב 🚗\n` +
-    `שם: ${input.fullName ?? '—'}\n` +
-    `טלפון: ${ctx.phoneNumber}\n` +
-    `מספר רכב: ${input.vehicleNumber ?? '—'}\n` +
-    `תאריך: ${input.date ?? '—'}\n` +
-    `שעה: ${input.time ?? '—'}\n` +
-    `יחידה: ${input.unit ?? '—'}\n` +
-    `סיבת כניסה: ${input.reason ?? '—'}`;
+    `בקשת אישור כניסה 🚗\n` +
+    `נשלח מהבוט של מערך היח״ש\n` +
+    `טלפון הפונה: ${ctx.phoneNumber}\n\n` +
+    renderVehicleEntryForm(parsed.values);
 
   const id = randomUUID();
   ctx.db
@@ -296,7 +327,7 @@ export async function submitVehicleEntry(
       `INSERT INTO chatbot_requests (id, conversation_id, phone_number, type, payload, staff_phone, status)
        VALUES (?, ?, ?, 'vehicle_entry', ?, ?, ?)`,
     )
-    .run(id, ctx.conversation.id, ctx.phoneNumber, JSON.stringify(input), to, to ? 'pending' : 'unconfigured');
+    .run(id, ctx.conversation.id, ctx.phoneNumber, JSON.stringify(parsed.values), to, to ? 'pending' : 'unconfigured');
 
   if (!to) {
     return { ok: false, error: 'לא הוגדר מספר סגל לאישורי רכב. הבקשה נשמרה במערכת אך לא נשלחה.' };
@@ -313,6 +344,7 @@ export async function submitVehicleEntry(
 }
 
 export const TOOLS: ChatbotTool[] = [
+  getVehicleEntryFormat,
   searchGeneralKnowledge,
   searchOrders,
   getOrderStatus,

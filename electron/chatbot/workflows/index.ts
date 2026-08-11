@@ -7,43 +7,28 @@
  * state, and IPC layer stay untouched.
  */
 import type { ChatbotIntent, WorkflowDefinition } from '../types';
-import { submitVehicleEntry } from '../tools';
 
 const vehicleEntry: WorkflowDefinition = {
   id: 'vehicle_entry',
   intent: 'VEHICLE_ENTRY',
-  label: 'אישור כניסת רכב לקסטינה',
-  instructions: `המשתמש מבקש אישור כניסת רכב לקסטינה.
-אסוף בשיחה טבעית רק את הפרטים שעדיין חסרים. אל תשאל שוב על מה שכבר נמסר.
-שאל שאלה אחת או שתיים בכל הודעה — לא שאלון שלם.
-כשכל השדות הנדרשים קיימים, קרא ל-sendVehicleEntryRequest ורק אחרי שהכלי מחזיר הצלחה אמור למשתמש שהבקשה נשלחה.`,
-  requiredFields: [
-    { key: 'fullName', label: 'שם מלא' },
-    { key: 'vehicleNumber', label: 'מספר רכב' },
-    { key: 'date', label: 'תאריך כניסה' },
-    { key: 'time', label: 'שעת כניסה' },
-    { key: 'unit', label: 'יחידה / מסגרת' },
-    { key: 'reason', label: 'סיבת כניסה' },
-  ],
-  tools: ['sendVehicleEntryRequest', 'escalateToStaff'],
-  complete: async (data, ctx) => {
-    const result = await submitVehicleEntry(data, ctx);
-    if (result.ok) {
-      return {
-        ok: true,
-        message:
-          `הבקשה נשלחה לסגל ✅\n\n` +
-          `שם: ${data.fullName}\n` +
-          `מספר רכב: ${data.vehicleNumber}\n` +
-          `תאריך: ${data.date}\n` +
-          `שעה: ${data.time}\n` +
-          `יחידה: ${data.unit ?? '—'}\n` +
-          `סיבת כניסה: ${data.reason ?? '—'}\n\n` +
-          `נעדכן אותך כשיהיה אישור.`,
-      };
-    }
-    return { ok: false, message: `לא הצלחתי לשלוח את הבקשה כרגע. ${result.error ?? ''}`.trim() };
-  },
+  label: 'אישור כניסה לקסטינה',
+  instructions: `המשתמש מבקש אישור כניסה לקסטינה.
+
+התהליך הוא פורמט — לא שאלון:
+
+שלב 1 — אם המשתמש עדיין לא שלח פורמט מלא:
+קרא ל-getVehicleEntryFormat ושלח למשתמש את הטקסט שחוזר **בדיוק כפי שהוא**, מילה במילה.
+אל תנסח מחדש, אל תוסיף שדות, אל תוריד שדות ואל תשנה סדר.
+אפשר להוסיף לפני הפורמט משפט קצר אחד בלבד, למשל: "בשמחה, אנא מלא/י את הפורמט הבא ושלח/י לי אותו חזרה."
+אל תשאל את המשתמש שאלות על השדות בשלב הזה — הוא ממלא את הפורמט בעצמו.
+
+שלב 2 — כשהמשתמש שולח בחזרה פורמט מלא:
+קרא ל-sendVehicleEntryRequest והעבר ב-filledForm את הטקסט המלא שהמשתמש שלח, בדיוק כפי שנשלח.
+אם הכלי מחזיר שחסרים שדות — בקש מהמשתמש רק את השדות שהכלי ציין, ואז נסה שוב.
+רק אחרי שהכלי מחזיר הצלחה אמור למשתמש שהבקשה הועברה.`,
+  // No requiredFields: the form itself is the unit of completeness, and it is
+  // validated in code by sendVehicleEntryRequest rather than field-by-field.
+  tools: ['getVehicleEntryFormat', 'sendVehicleEntryRequest', 'escalateToStaff'],
 };
 
 const orderDistribution: WorkflowDefinition = {
@@ -71,8 +56,16 @@ const openCall: WorkflowDefinition = {
   intent: 'OPEN_CALL',
   label: 'קול קורא',
   instructions: `זהה קודם מה המשתמש רוצה:
+
 1) לראות קולות קוראים קיימים — השתמש ב-searchOpenCalls.
-2) לפרסם קול קורא חדש — אסוף בשיחה טבעית: נושא, תיאור, קהל יעד ותאריך אחרון להגשה, ואז קרא ל-sendMessageToStaff עם kind="open_call".
+
+2) לפרסם קול קורא חדש — זה התהליך העיקרי:
+   בקש מהמשתמש לשלוח את התוכן שהוא רוצה לפרסם, כפי שהוא רוצה שיפורסם.
+   ברגע שהוא שולח את התוכן — קרא מיד ל-sendMessageToStaff עם kind="open_call"
+   וב-details את הטקסט המלא שהמשתמש שלח, מילה במילה וללא שינוי.
+   אל תערוך, אל תקצר ואל תשפר את הניסוח שלו.
+   רק אחרי שהכלי מחזיר הצלחה אמור שהבקשה הועברה לפרסום.
+
 אל תניח איזה מהשניים — אם לא ברור, שאל שאלה קצרה אחת.`,
   tools: ['searchOpenCalls', 'sendMessageToStaff', 'escalateToStaff'],
 };

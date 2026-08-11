@@ -621,6 +621,8 @@ export interface ElectronAPI {
       create: (entry: { category: string; title: string; content: string; metadata?: Record<string, unknown> }) => Promise<any>;
       update: (id: string, patch: Record<string, unknown>) => Promise<any>;
       delete: (id: string) => Promise<void>;
+      bulkImport: (category: string, text: string) => Promise<{ created: number; titles: string[] }>;
+      deleteDemo: () => Promise<{ deleted: number }>;
     };
     simulate: (phoneNumber: string, message: string) => Promise<{ handled: boolean; reply?: string; intent?: string; error?: string }>;
     resetConversation: (phoneNumber: string) => Promise<void>;

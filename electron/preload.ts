@@ -201,6 +201,8 @@ const electronAPI: ElectronAPI = {
       create: (entry) => ipcRenderer.invoke('chatbot:knowledge:create', entry),
       update: (id, patch) => ipcRenderer.invoke('chatbot:knowledge:update', id, patch),
       delete: (id) => ipcRenderer.invoke('chatbot:knowledge:delete', id),
+      bulkImport: (category, text) => ipcRenderer.invoke('chatbot:knowledge:bulkImport', category, text),
+      deleteDemo: () => ipcRenderer.invoke('chatbot:knowledge:deleteDemo'),
     },
     simulate: (phoneNumber, message) => ipcRenderer.invoke('chatbot:simulate', phoneNumber, message),
     resetConversation: (phoneNumber) => ipcRenderer.invoke('chatbot:resetConversation', phoneNumber),

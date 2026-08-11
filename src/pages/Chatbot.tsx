@@ -19,11 +19,36 @@ import { toast } from '@/components/ui/use-toast';
  */
 
 const CATEGORIES = [
-  { id: 'general', label: 'ידע כללי' },
-  { id: 'orders', label: 'פקודות' },
-  { id: 'replacements', label: 'לו״ז החלפה' },
-  { id: 'development_tracks', label: 'מסלולי פיתוח' },
-  { id: 'open_calls', label: 'קול קורא' },
+  {
+    id: 'general',
+    label: 'ידע כללי',
+    hint: 'נהלים, אנשי קשר, שאלות נפוצות, הנחיות, קישורים.',
+    meta: '{}',
+  },
+  {
+    id: 'orders',
+    label: 'פקודות',
+    hint: 'שם הפקודה + סטטוס הפצה.',
+    meta: '{"status":"הופצה","distributed_at":"2026-10-01"}',
+  },
+  {
+    id: 'replacements',
+    label: 'לו״ז החלפה',
+    hint: 'מחזורי החלפה — מתי נכנסים ומתי יוצאים.',
+    meta: '{"entry_date":"2026-11-02","exit_date":"2026-11-16"}',
+  },
+  {
+    id: 'development_tracks',
+    label: 'מסלולי פיתוח',
+    hint: 'מסלולים, קהל יעד ותנאי קבלה.',
+    meta: '{"audience":"נגדים"}',
+  },
+  {
+    id: 'open_calls',
+    label: 'קול קורא',
+    hint: 'קולות קוראים קיימים.',
+    meta: '{"status":"פתוח","deadline":"2026-12-31"}',
+  },
 ] as const;
 
 type TabId = 'settings' | 'knowledge' | 'conversations' | 'inbox' | 'test';
@@ -235,9 +260,32 @@ function KnowledgeTab({ api, onChange }: any) {
   const [category, setCategory] = useState<string>('general');
   const [entries, setEntries] = useState<any[]>([]);
   const [draft, setDraft] = useState({ title: '', content: '', metadata: '{}' });
+  const [bulk, setBulk] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const current = CATEGORIES.find(c => c.id === category)!;
 
   const load = async () => setEntries(await api.knowledge.list(category));
-  useEffect(() => { load(); }, [category]);
+  useEffect(() => { load(); setDraft(d => ({ ...d, metadata: current.meta })); }, [category]);
+
+  const importDoc = async () => {
+    if (!bulk.trim()) { toast.error('אין טקסט לייבוא'); return; }
+    setBusy(true);
+    try {
+      const res = await api.knowledge.bulkImport(category, bulk);
+      setBulk('');
+      await load(); onChange?.();
+      toast.success(`יובאו ${res.created} רשומות`);
+    } catch (e: any) {
+      toast.error('הייבוא נכשל', String(e?.message ?? e));
+    } finally { setBusy(false); }
+  };
+
+  const removeDemo = async () => {
+    const res = await api.knowledge.deleteDemo();
+    await load(); onChange?.();
+    toast.success(`נמחקו ${res.deleted} רשומות דוגמה`);
+  };
 
   const create = async () => {
     if (!draft.title.trim() || !draft.content.trim()) {
@@ -269,19 +317,52 @@ function KnowledgeTab({ api, onChange }: any) {
         ))}
       </div>
 
+      <p className="text-sm text-muted-foreground">{current.hint}</p>
+
       <Card>
-        <CardHeader><CardTitle className="text-base">הוספת רשומה</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">הדבקת מסמך שלם</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            הדבק כאן מסמך שלם והוא יפוצל אוטומטית לרשומות נפרדות — כך הבוט מוצא בדיוק את
+            הסעיף הרלוונטי במקום לקרוא את כל המסמך.
+            <br />
+            הפיצול לפי כותרות שמתחילות ב-<code className="font-mono">#</code>, ואם אין כותרות — לפי שורה ריקה
+            (השורה הראשונה בכל פסקה היא הכותרת).
+          </p>
+          <Textarea
+            rows={8}
+            dir="rtl"
+            placeholder={'# שעות פעילות\nהסגל זמין א׳-ה׳ 08:00-16:00.\n\n# איש קשר לנושא רכב\nיובל — 052-451-2658'}
+            value={bulk}
+            onChange={e => setBulk(e.target.value)}
+          />
+          <Button size="sm" onClick={importDoc} disabled={busy}>
+            <Plus className="h-4 w-4 ml-1" /> {busy ? 'מייבא…' : 'ייבא מסמך'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">הוספת רשומה בודדת</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="כותרת" value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} />
           <Textarea rows={3} placeholder="תוכן" value={draft.content} onChange={e => setDraft({ ...draft, content: e.target.value })} />
           <Input
-            placeholder='מטא-דאטה JSON, למשל {"status":"הופצה","distributed_at":"2026-10-01"}'
+            placeholder={`מטא-דאטה JSON, למשל ${current.meta}`}
             value={draft.metadata}
             onChange={e => setDraft({ ...draft, metadata: e.target.value })}
           />
           <Button size="sm" onClick={create}><Plus className="h-4 w-4 ml-1" /> הוסף</Button>
         </CardContent>
       </Card>
+
+      <div className="flex justify-end">
+        <Button size="sm" variant="outline" onClick={removeDemo}>
+          <Trash2 className="h-4 w-4 ml-1" /> מחק את כל רשומות הדוגמה
+        </Button>
+      </div>
 
       <div className="space-y-2">
         {entries.length === 0 && <p className="text-sm text-muted-foreground">אין רשומות בקטגוריה זו.</p>}

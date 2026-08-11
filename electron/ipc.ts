@@ -2948,6 +2948,17 @@ export function setupIPCHandlers() {
     knowledgeService.delete(id);
   });
 
+  // Paste a whole document; it is split into sections so retrieval returns the
+  // relevant part instead of the entire file.
+  ipcMain.handle('chatbot:knowledge:bulkImport', (_event, category: string, text: string) =>
+    knowledgeService.bulkImport(category as any, text ?? ''),
+  );
+
+  ipcMain.handle('chatbot:knowledge:deleteDemo', () => {
+    const info = db.prepare(`DELETE FROM chatbot_knowledge WHERE title LIKE '[דוגמה]%'`).run();
+    return { deleted: info.changes };
+  });
+
   /**
    * Test console: runs a full turn (intent → workflow → tools → reply) without
    * sending anything over WhatsApp, so the flow can be exercised safely.

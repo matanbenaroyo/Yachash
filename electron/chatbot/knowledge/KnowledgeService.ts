@@ -94,6 +94,36 @@ export class KnowledgeService {
     this.db.prepare(`DELETE FROM chatbot_knowledge WHERE id = ?`).run(id);
   }
 
+  /**
+   * Imports a whole pasted document as multiple entries.
+   *
+   * Retrieval works far better on many small entries than one huge blob — the
+   * model gets only the relevant section instead of the entire document — so
+   * the text is split into sections rather than stored as a single row.
+   *
+   * Splitting rules, in order of preference:
+   *   1. Markdown headings (`# כותרת`) start a new section, heading = title.
+   *   2. Otherwise a blank line starts a new section, first line = title.
+   */
+  bulkImport(category: KnowledgeCategory, text: string): { created: number; titles: string[] } {
+    const sections = splitDocument(text || '');
+    const created: string[] = [];
+
+    const insert = this.db.prepare(
+      `INSERT INTO chatbot_knowledge (id, category, title, content, metadata, is_active)
+       VALUES (?, ?, ?, ?, '{}', 1)`,
+    );
+    const run = this.db.transaction(() => {
+      for (const s of sections) {
+        insert.run(randomUUID(), category, s.title, s.content);
+        created.push(s.title);
+      }
+    });
+    run();
+
+    return { created: created.length, titles: created };
+  }
+
   get(id: string): KnowledgeEntry | null {
     const row = this.db.prepare(`SELECT * FROM chatbot_knowledge WHERE id = ?`).get(id);
     return row ? toEntry(row) : null;
@@ -105,6 +135,53 @@ export class KnowledgeService {
       .all() as Array<{ category: string; n: number }>;
     return Object.fromEntries(rows.map(r => [r.category, r.n]));
   }
+}
+
+/**
+ * Splits a pasted document into titled sections. Falls back to one section per
+ * blank-line-separated block, and finally to the whole text as a single entry,
+ * so a paste is never silently dropped.
+ */
+function splitDocument(text: string): Array<{ title: string; content: string }> {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const lines = trimmed.split(/\r?\n/);
+  const hasHeadings = lines.some(l => /^\s{0,3}#{1,6}\s+\S/.test(l));
+
+  const sections: Array<{ title: string; content: string[] }> = [];
+
+  if (hasHeadings) {
+    let current: { title: string; content: string[] } | null = null;
+    for (const line of lines) {
+      const heading = line.match(/^\s{0,3}#{1,6}\s+(.*\S)\s*$/);
+      if (heading) {
+        if (current) sections.push(current);
+        current = { title: heading[1].trim(), content: [] };
+      } else if (current) {
+        current.content.push(line);
+      } else if (line.trim()) {
+        // Text before the first heading becomes its own section.
+        current = { title: line.trim().slice(0, 80), content: [] };
+      }
+    }
+    if (current) sections.push(current);
+  } else {
+    for (const block of trimmed.split(/\n\s*\n/)) {
+      const blockLines = block.split(/\r?\n/).filter(l => l.trim());
+      if (!blockLines.length) continue;
+      sections.push({ title: blockLines[0].trim().slice(0, 80), content: blockLines.slice(1) });
+    }
+  }
+
+  return sections
+    .map(s => ({
+      title: s.title,
+      // Keep the title in the body too: a section that is only a heading would
+      // otherwise import with empty content and match nothing on search.
+      content: s.content.join('\n').trim() || s.title,
+    }))
+    .filter(s => s.title);
 }
 
 function toEntry(row: any): KnowledgeEntry {
