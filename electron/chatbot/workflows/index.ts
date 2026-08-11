@@ -80,16 +80,45 @@ const developmentTracks: WorkflowDefinition = {
   tools: ['searchDevelopmentTracks', 'escalateToStaff'],
 };
 
+const seniorStaff: WorkflowDefinition = {
+  id: 'senior_staff',
+  intent: 'SENIOR_STAFF',
+  label: 'הפניה לסגל בכיר / רמ״דית',
+  instructions: `המשתמשת רוצה להגיע לסגל בכיר או לרמ״דית שלה, או שהשאלה שלה מחייבת גורם אנושי.
+
+שלב 1 — אם עדיין לא נבחרה דרגה:
+קרא ל-getSeniorStaffOptions ושלח את הטקסט שחוזר **בדיוק כפי שהוא**, מילה במילה.
+אל תשנה ניסוח, אל תשנה מספור ואל תקצר אפשרויות.
+לפני התפריט אפשר משפט קצר אחד בלבד.
+
+שלב 2 — כשהיא עונה (בדרך כלל מספר בין 1 ל-5):
+קרא ל-escalateToSeniorStaff עם:
+- rankAnswer: התשובה שלה בדיוק כפי שנכתבה
+- question: השאלה או הבקשה שלה
+- fullName: שמה אם ידוע
+- summary: סיכום קצר של השיחה
+
+אם הכלי מחזיר שהתשובה לא תואמת — שלח שוב את התפריט ובקש לבחור מספר.
+רק אחרי שהכלי מחזיר הצלחה אמור לה שהפנייה הועברה, וציין למי.
+
+חשוב: אם עדיין לא ברור מה השאלה שלה — שאל אותה קודם מה הנושא, ורק אז את הדרגה.`,
+  tools: ['getSeniorStaffOptions', 'escalateToSeniorStaff', 'searchGeneralKnowledge'],
+};
+
 const generalQuestion: WorkflowDefinition = {
   id: 'general_question',
   intent: 'GENERAL_QUESTION',
   label: 'שאלה כללית לסגל היח״ש',
   instructions: `שאלה כללית על מערך היח״ש.
+
 1. חפש קודם ב-searchGeneralKnowledge.
-2. אם נמצאה תשובה אמינה — ענה עליה בקצרה.
-3. אם לא — אל תמציא. קרא ל-escalateToStaff עם השאלה וסיכום קצר, ואז אמור למשתמש:
-"לא מצאתי כרגע תשובה מספיק ודאית, אז העברתי את השאלה לסגל היח״ש לבדיקה."`,
-  tools: ['searchGeneralKnowledge', 'escalateToStaff'],
+2. אם נמצאה תשובה אמינה — ענה עליה בקצרה וסיים.
+3. אם לא נמצאה תשובה ודאית — אל תמציא. עבור להפניה לסגל בכיר:
+   א. אמור לה: "לא מצאתי כרגע תשובה מספיק ודאית, אז אעביר את השאלה לסגל."
+   ב. קרא ל-getSeniorStaffOptions ושלח את התפריט **מילה במילה**.
+   ג. כשהיא בוחרת — קרא ל-escalateToSeniorStaff עם rankAnswer, question, ו-summary.
+   ד. רק אחרי הצלחה אמור שהפנייה הועברה, וציין למי.`,
+  tools: ['searchGeneralKnowledge', 'getSeniorStaffOptions', 'escalateToSeniorStaff'],
 };
 
 const other: WorkflowDefinition = {
@@ -97,8 +126,10 @@ const other: WorkflowDefinition = {
   intent: 'OTHER',
   label: 'אחר',
   instructions: `הבקשה לא נכנסת לאף קטגוריה מוגדרת.
-נסה להבין מה נדרש בשאלת הבהרה קצרה אחת. אם זו שאלה על היח״ש — טפל בה כמו שאלה כללית והשתמש ב-searchGeneralKnowledge, ואם אין תשובה העבר לסגל.`,
-  tools: ['searchGeneralKnowledge', 'escalateToStaff', 'sendMessageToStaff'],
+נסה להבין מה נדרש בשאלת הבהרה קצרה אחת.
+אם זו שאלה על היח״ש — טפל בה כמו שאלה כללית והשתמש ב-searchGeneralKnowledge.
+אם אין תשובה ודאית או שנדרש גורם אנושי — שלח את תפריט הדרגות (getSeniorStaffOptions) והעבר עם escalateToSeniorStaff.`,
+  tools: ['searchGeneralKnowledge', 'getSeniorStaffOptions', 'escalateToSeniorStaff', 'sendMessageToStaff'],
 };
 
 export const WORKFLOWS: WorkflowDefinition[] = [
@@ -108,6 +139,7 @@ export const WORKFLOWS: WorkflowDefinition[] = [
   openCall,
   developmentTracks,
   generalQuestion,
+  seniorStaff,
   other,
 ];
 

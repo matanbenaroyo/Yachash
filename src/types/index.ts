@@ -371,6 +371,7 @@ export interface ChatbotConfig {
   openCallStaffPhone: string;
   historyTurns: number;
   greeting: string;
+  seniorStaffRouting: Array<{ option: number; label: string; name: string; phone: string }>;
 }
 
 export interface ChatbotStatus {

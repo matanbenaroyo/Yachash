@@ -229,6 +229,49 @@ function SettingsTab({ config, save, saving, workflows }: any) {
       </Card>
 
       <Card>
+        <CardHeader><CardTitle className="text-base">הפניה לסגל בכיר — ניתוב לפי דרגה</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            כשמישהי מבקשת להגיע לסגל בכיר או לרמ״דית — או כשאין לבוט תשובה ודאית — הבוט שולח לה
+            את האפשרויות האלו ומעביר את הפנייה לגורם המתאים.
+            הטקסט נשלח בדיוק כפי שהוא כתוב כאן.
+          </p>
+          {(form.seniorStaffRouting ?? []).map((r: any, i: number) => (
+            <div key={i} className="grid grid-cols-1 md:grid-cols-[2rem_1fr_10rem_10rem] gap-2 items-center">
+              <div className="text-sm text-muted-foreground text-center">{r.option}</div>
+              <Input
+                value={r.label ?? ''}
+                placeholder="תיאור הדרגה"
+                onChange={e => {
+                  const next = [...form.seniorStaffRouting];
+                  next[i] = { ...next[i], label: e.target.value };
+                  set('seniorStaffRouting', next);
+                }}
+              />
+              <Input
+                value={r.name ?? ''}
+                placeholder="שם איש הקשר"
+                onChange={e => {
+                  const next = [...form.seniorStaffRouting];
+                  next[i] = { ...next[i], name: e.target.value };
+                  set('seniorStaffRouting', next);
+                }}
+              />
+              <Input
+                value={r.phone ?? ''}
+                placeholder="972501234567"
+                onChange={e => {
+                  const next = [...form.seniorStaffRouting];
+                  next[i] = { ...next[i], phone: e.target.value };
+                  set('seniorStaffRouting', next);
+                }}
+              />
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader><CardTitle className="text-base">הודעת פתיחה</CardTitle></CardHeader>
         <CardContent>
           <Textarea rows={5} value={form.greeting ?? ''} onChange={e => set('greeting', e.target.value)} />

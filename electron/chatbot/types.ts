@@ -14,6 +14,7 @@ export type ChatbotIntent =
   | 'OPEN_CALL'
   | 'DEVELOPMENT_TRACKS'
   | 'GENERAL_QUESTION'
+  | 'SENIOR_STAFF'
   | 'OTHER'
   | 'UNKNOWN';
 
@@ -24,6 +25,7 @@ export const CHATBOT_INTENTS: ChatbotIntent[] = [
   'OPEN_CALL',
   'DEVELOPMENT_TRACKS',
   'GENERAL_QUESTION',
+  'SENIOR_STAFF',
   'OTHER',
   'UNKNOWN',
 ];
@@ -140,6 +142,8 @@ export interface ChatbotConfig {
   /** Max turns kept verbatim before older ones are summarized away. */
   historyTurns: number;
   greeting: string;
+  /** Rank -> staff member routing for senior-staff escalations. */
+  seniorStaffRouting: Array<{ option: number; label: string; name: string; phone: string }>;
 }
 
 export interface KnowledgeSearchParams {

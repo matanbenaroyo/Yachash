@@ -14,6 +14,7 @@ import {
   parseVehicleEntryForm,
   renderVehicleEntryForm,
 } from '../workflows/vehicleEntryFormat';
+import { buildRankMenu, resolveRoute } from '../seniorStaff';
 
 function knowledge(ctx: WorkflowContext) {
   return new KnowledgeService(ctx.db);
@@ -197,6 +198,86 @@ const sendVehicleEntryRequest: ChatbotTool = {
   execute: async (input, ctx) => submitVehicleEntry(input, ctx),
 };
 
+const getSeniorStaffOptions: ChatbotTool = {
+  name: 'getSeniorStaffOptions',
+  description:
+    'Returns the rank menu to show someone who needs to reach senior staff or her רמ״דית. ' +
+    'Send the returned text to the user EXACTLY as-is — the options and their numbering must not ' +
+    'be reworded, reordered or abbreviated. Call this before escalateToSeniorStaff.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: (_input, ctx) => ({
+    ok: true,
+    data: { menu: buildRankMenu(ctx.config.seniorStaffRouting) },
+  }),
+};
+
+const escalateToSeniorStaff: ChatbotTool = {
+  name: 'escalateToSeniorStaff',
+  description:
+    'Routes a question to the senior staff member responsible for the user\'s rank, over WhatsApp. ' +
+    'Pass rankAnswer exactly as the user replied to the rank menu (usually a digit 1-5). ' +
+    'If the answer does not match an option this returns ok:false — re-send the menu instead of guessing. ' +
+    'Include the question and, if known, her name.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      rankAnswer: { type: 'string', description: "The user's reply to the rank menu, verbatim" },
+      question: { type: 'string', description: "The user's question or request, in Hebrew" },
+      fullName: { type: 'string', description: 'Her name if she gave it' },
+      summary: { type: 'string', description: 'Short Hebrew summary of the conversation' },
+    },
+    required: ['rankAnswer', 'question'],
+  },
+  execute: async (input, ctx) => {
+    const routes = ctx.config.seniorStaffRouting;
+    const route = resolveRoute(input.rankAnswer, routes);
+
+    if (!route) {
+      return {
+        ok: false,
+        error: 'התשובה לא תואמת אף אפשרות. שלח שוב את התפריט ובקש לבחור מספר בין 1 ל-' + routes.length + '.',
+        data: { menu: buildRankMenu(routes) },
+      };
+    }
+    if (!route.phone) {
+      return { ok: false, error: `לא מוגדר מספר טלפון עבור "${route.label}". יש להשלים בהגדרות.` };
+    }
+
+    const body =
+      `פנייה חדשה מהבוט 🤖\n` +
+      `קטגוריה: ${route.label}\n` +
+      `שם: ${input.fullName || 'לא נמסר'}\n` +
+      `טלפון: ${ctx.phoneNumber}\n\n` +
+      `השאלה:\n${input.question}` +
+      (input.summary ? `\n\nסיכום השיחה:\n${input.summary}` : '');
+
+    const id = randomUUID();
+    ctx.db
+      .prepare(
+        `INSERT INTO chatbot_escalations (id, conversation_id, phone_number, question, summary, staff_phone, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+      )
+      .run(
+        id,
+        ctx.conversation.id,
+        ctx.phoneNumber,
+        String(input.question ?? ''),
+        `[${route.label}] → ${route.name}\n${input.summary ?? ''}`.trim(),
+        route.phone,
+      );
+
+    try {
+      await ctx.sendWhatsApp(route.phone, body);
+      ctx.db.prepare(`UPDATE chatbot_escalations SET status = 'sent' WHERE id = ?`).run(id);
+      ctx.db.prepare(`UPDATE chatbot_conversations SET status = 'escalated' WHERE id = ?`).run(ctx.conversation.id);
+      return { ok: true, data: { routedTo: route.name, category: route.label } };
+    } catch (e: any) {
+      ctx.db.prepare(`UPDATE chatbot_escalations SET status = 'failed', error = ? WHERE id = ?`).run(String(e?.message ?? e), id);
+      return { ok: false, error: `העברת הפנייה נכשלה: ${e?.message ?? e}` };
+    }
+  },
+};
+
 const escalateToStaff: ChatbotTool = {
   name: 'escalateToStaff',
   description:
@@ -354,6 +435,8 @@ export const TOOLS: ChatbotTool[] = [
   searchOpenCalls,
   sendVehicleEntryRequest,
   sendMessageToStaff,
+  getSeniorStaffOptions,
+  escalateToSeniorStaff,
   escalateToStaff,
 ];
 
