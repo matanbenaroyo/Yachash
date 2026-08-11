@@ -11,7 +11,7 @@ production LeadSender data.
 | | |
 |---|---|
 | **Project directory** | `C:\Users\97250\projects\leadsender` |
-| **`origin`** (your fork, push here) | `https://github.com/matanbenaroyo/leadsender.git` |
+| **`origin`** (your fork, push here) | `https://github.com/matanbenaroyo/Yachash.git` |
 | **`upstream`** (original, fetch only) | `https://github.com/barelzrihan2002/leadsender.git` |
 | **Branch** | `main` |
 
@@ -173,7 +173,7 @@ history, use `git merge upstream/main` instead.
 
 **Conflicts to expect**, because these are exactly the files this fork changed:
 
-- `package.json` — keep **your** `repository` (`matanbenaroyo/leadsender`), your
+- `package.json` — keep **your** `repository` (`matanbenaroyo/Yachash`), your
   `--publish never` flags, and the `setup` / `typecheck` scripts
 - `electron-builder.yml` — keep **your** `publish:` block and `directories.output: release`
 - `electron/main.ts` — keep the dev-isolation block at the top
@@ -202,3 +202,84 @@ Never `git push upstream`.
 - **`whatsapp-web.js` tracks a moving git branch** (`github:pedroslopez/whatsapp-web.js#main`).
   `package-lock.json` pins a commit, so `npm ci` is reproducible — but a future
   `npm update` could pull an unrelated upstream state.
+
+---
+
+## 11. AI chatbot — מערך היח״ש
+
+A modular AI chatbot that answers incoming WhatsApp messages in Hebrew. It is
+**separate from the bulk-campaign system** and **off by default**.
+
+### Where things live
+
+| Path | Purpose |
+|---|---|
+| `electron/chatbot/ChatbotService.ts` | Engine — orchestrates the whole turn |
+| `electron/chatbot/intentRouter.ts` | Classifies a message into one of 8 intents |
+| `electron/chatbot/workflows/index.ts` | **One entry per capability** — add new workflows here |
+| `electron/chatbot/tools/index.ts` | The AI/business-logic boundary: every real action |
+| `electron/chatbot/knowledge/KnowledgeService.ts` | Retrieval over all data sources |
+| `electron/chatbot/ConversationManager.ts` | Per-phone conversation state |
+| `electron/chatbot/dateParser.ts` | Hebrew relative dates (מחר, יום ראשון, 20.8) |
+| `electron/chatbot/prompts/system.ts` | System prompts (wording only, no logic) |
+| `src/pages/Chatbot.tsx` | Management UI |
+
+### Turning it on
+
+1. Open **בוט היח״ש** in the sidebar → **הגדרות**.
+2. Paste an Anthropic API key (get one at <https://console.anthropic.com>).
+   It is stored in the app's local `settings` table — never in the repo.
+3. Set the staff destination numbers (international format, e.g. `972501234567`):
+   - אישורי כניסת רכב → `vehicleEntryStaffPhone`
+   - שאלות כלליות / הסלמות → `generalStaffPhone`
+   - קול קורא → `openCallStaffPhone`
+   A blank field falls back to the general number.
+4. Toggle **צ׳אטבוט פעיל** and save.
+
+The bot then answers incoming messages on connected accounts. It runs **after**
+the existing automation flows, so a message a flow already handled never reaches it.
+
+### Managing knowledge
+
+**מאגר ידע** tab. Five categories, each backed by the same table:
+`ידע כללי`, `פקודות`, `לו״ז החלפה`, `מסלולי פיתוח`, `קול קורא`.
+
+Each row has a title, content, and a JSON metadata blob for the fields that
+category needs:
+
+| Category | Useful metadata |
+|---|---|
+| `orders` | `{"status": "הופצה", "distributed_at": "2026-10-01"}` |
+| `replacements` | `{"entry_date": "2026-11-02", "exit_date": "2026-11-16"}` |
+| `development_tracks` | `{"audience": "נגדים"}` |
+| `open_calls` | `{"status": "פתוח", "deadline": "2026-12-31"}` |
+
+Rows titled `[דוגמה]` are placeholder demo data seeded on first run —
+**delete them and enter the real organizational data.**
+
+### Testing without sending messages
+
+**בדיקה** tab runs the full pipeline (intent → workflow → tools → reply) and
+shows the bot's answer without sending anything over WhatsApp. Note that
+completion actions (forwarding a vehicle request to staff) *do* send if a staff
+number is configured.
+
+### Adding a new workflow
+
+Append one `WorkflowDefinition` to `electron/chatbot/workflows/index.ts` with its
+intent, required fields, allowed tools, instructions and completion action; add
+the intent to `ChatbotIntent` in `types.ts`, and a tool to `tools/index.ts` if it
+needs a new action. The engine, conversation state and IPC layer do not change.
+
+### Guarantees
+
+- The AI never invents organizational facts — dates, orders, schedules, tracks
+  and procedures come only from tool results.
+- The AI cannot declare an action successful; only a tool result can.
+- Unanswerable questions are escalated to the configured staff number rather
+  than guessed at.
+
+### Still to provide
+
+Real data for all five knowledge categories, and the staff WhatsApp numbers.
+Until then the bot will correctly say it has no information and escalate.
