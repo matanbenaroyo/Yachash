@@ -186,6 +186,26 @@ const electronAPI: ElectronAPI = {
     getVersion: () => ipcRenderer.invoke('updater:get-version'),
   },
 
+  chatbot: {
+    getConfig: () => ipcRenderer.invoke('chatbot:getConfig'),
+    saveConfig: (patch) => ipcRenderer.invoke('chatbot:saveConfig', patch),
+    getStatus: () => ipcRenderer.invoke('chatbot:getStatus'),
+    getWorkflows: () => ipcRenderer.invoke('chatbot:getWorkflows'),
+    getConversations: (limit) => ipcRenderer.invoke('chatbot:getConversations', limit),
+    getMessages: (conversationId) => ipcRenderer.invoke('chatbot:getMessages', conversationId),
+    getEscalations: () => ipcRenderer.invoke('chatbot:getEscalations'),
+    getRequests: () => ipcRenderer.invoke('chatbot:getRequests'),
+    getErrors: () => ipcRenderer.invoke('chatbot:getErrors'),
+    knowledge: {
+      list: (category) => ipcRenderer.invoke('chatbot:knowledge:list', category),
+      create: (entry) => ipcRenderer.invoke('chatbot:knowledge:create', entry),
+      update: (id, patch) => ipcRenderer.invoke('chatbot:knowledge:update', id, patch),
+      delete: (id) => ipcRenderer.invoke('chatbot:knowledge:delete', id),
+    },
+    simulate: (phoneNumber, message) => ipcRenderer.invoke('chatbot:simulate', phoneNumber, message),
+    resetConversation: (phoneNumber) => ipcRenderer.invoke('chatbot:resetConversation', phoneNumber),
+  },
+
   logs: {
     get: () => ipcRenderer.invoke('logs:get'),
     clear: () => ipcRenderer.invoke('logs:clear'),

@@ -657,6 +657,128 @@ export async function initDatabase() {
     console.log('ℹ️ Campaign contacts dedupe/unique index migration already applied or not needed');
   }
 
+  // ==================== AI Chatbot (מערך היח״ש) ====================
+  // Separate from the campaign tables: the chatbot feature owns these and
+  // nothing in the bulk-sending path reads or writes them.
+  db.exec(`
+    -- One row per active/closed conversation with a WhatsApp user
+    CREATE TABLE IF NOT EXISTS chatbot_conversations (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      phone_number TEXT NOT NULL,
+      active_intent TEXT,
+      active_workflow TEXT,
+      collected_data TEXT DEFAULT '{}',
+      conversation_context TEXT DEFAULT '',
+      status TEXT DEFAULT 'active',
+      last_message_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS chatbot_messages (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (conversation_id) REFERENCES chatbot_conversations(id) ON DELETE CASCADE
+    );
+
+    -- Editable data sources the AI may retrieve from. One table, many categories,
+    -- so a new knowledge source is a new category rather than new plumbing.
+    CREATE TABLE IF NOT EXISTS chatbot_knowledge (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      metadata TEXT DEFAULT '{}',
+      is_active BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Completed submissions forwarded to staff (vehicle entry, קול קורא, ...)
+    CREATE TABLE IF NOT EXISTS chatbot_requests (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      phone_number TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload TEXT DEFAULT '{}',
+      staff_phone TEXT,
+      status TEXT DEFAULT 'pending',
+      error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Questions the bot could not answer and handed to a human
+    CREATE TABLE IF NOT EXISTS chatbot_escalations (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      phone_number TEXT NOT NULL,
+      question TEXT NOT NULL,
+      summary TEXT,
+      staff_phone TEXT,
+      status TEXT DEFAULT 'pending',
+      error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS chatbot_errors (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      phone_number TEXT,
+      error TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chatbot_conv_phone ON chatbot_conversations(phone_number, account_id);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_conv_status ON chatbot_conversations(status);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_messages_conv ON chatbot_messages(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_knowledge_cat ON chatbot_knowledge(category, is_active);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_requests_phone ON chatbot_requests(phone_number);
+  `);
+
+  // Seed demo/placeholder knowledge once, so the feature is explorable before
+  // real organizational data is entered. Marked clearly as demo content.
+  try {
+    const migrationId = 'chatbot_seed_placeholder_knowledge_v1';
+    const exists = db.prepare(`SELECT id FROM migrations WHERE id = ?`).get(migrationId);
+    if (!exists) {
+      const { v4: uuidv4 } = require('uuid');
+      const insert = db.prepare(`
+        INSERT INTO chatbot_knowledge (id, category, title, content, metadata, is_active)
+        VALUES (?, ?, ?, ?, ?, 1)
+      `);
+      const seed: Array<[string, string, string, Record<string, unknown>]> = [
+        ['general', '[דוגמה] שעות פעילות סגל היח״ש',
+          'סגל היח״ש זמין בימים א׳-ה׳ בין 08:00 ל-16:00. יש להחליף תוכן זה במידע האמיתי.',
+          { demo: true }],
+        ['orders', '[דוגמה] פקודת אוקטובר',
+          'פקודת אוקטובר — נתוני דוגמה. יש להחליף בנתוני הפקודות האמיתיים.',
+          { demo: true, status: 'הופצה', distributed_at: '2026-10-01' }],
+        ['replacements', '[דוגמה] החלפת אוקטובר',
+          'מחזור החלפה לדוגמה. יש להחליף בלו״ז האמיתי.',
+          { demo: true, entry_date: '2026-10-05', exit_date: '2026-10-19' }],
+        ['development_tracks', '[דוגמה] מסלול פיתוח לנגדים',
+          'מסלול לדוגמה לנגדים. יש להחליף בתנאי הקבלה והמסלולים האמיתיים.',
+          { demo: true, audience: 'נגדים' }],
+        ['open_calls', '[דוגמה] קול קורא לתפקיד',
+          'קול קורא לדוגמה. יש להחליף בקולות הקוראים האמיתיים.',
+          { demo: true, status: 'פתוח', deadline: '2026-12-31' }],
+      ];
+      const seedAll = db.transaction(() => {
+        for (const [category, title, content, metadata] of seed) {
+          insert.run(uuidv4(), category, title, content, JSON.stringify(metadata));
+        }
+        db.prepare(`INSERT INTO migrations (id) VALUES (?)`).run(migrationId);
+      });
+      seedAll();
+      console.log('🤖 Chatbot placeholder knowledge seeded');
+    }
+  } catch (e) {
+    console.log('ℹ️ Chatbot knowledge seed skipped:', e);
+  }
+
   // Create activities table for Recent Activity
   db.exec(`
     CREATE TABLE IF NOT EXISTS activities (

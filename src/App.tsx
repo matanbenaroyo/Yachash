@@ -18,6 +18,7 @@ import Extractor from './pages/Extractor';
 import AutoGroupJoin from './pages/AutoGroupJoin';
 import WarmUp from './pages/WarmUp';
 import FlowBuilder from './pages/FlowBuilder';
+import Chatbot from './pages/Chatbot';
 import FlowEditor from './pages/FlowEditor';
 import Templates from './pages/Templates';
 import Statistics from './pages/Statistics';
@@ -195,6 +196,7 @@ function App() {
               <Route path="warmup" element={<WarmUp />} />
               <Route path="templates" element={<Templates />} />
               <Route path="statistics" element={<Statistics />} />
+              <Route path="chatbot" element={<Chatbot />} />
               <Route path="flows" element={<FlowBuilder />} />
               <Route path="flows/:id" element={<FlowEditor />} />
               <Route path="logs" element={<Logs />} />

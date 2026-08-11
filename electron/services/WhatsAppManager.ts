@@ -107,6 +107,8 @@ export class WhatsAppManager {
   private connectingAccounts: Set<string> = new Set();
   private anonymizedProxyServers: Map<string, proxyChain.Server> = new Map(); // accountId -> proxy server
   private flowEngine: FlowEngine | null = null;
+  /** AI chatbot (מערך היח״ש). Optional — null when the feature is not wired. */
+  private chatbotService: any | null = null;
   private campaignScheduler: any | null = null;
   private chatManager: ChatManager;
 
@@ -159,6 +161,10 @@ export class WhatsAppManager {
 
   setFlowEngine(flowEngine: FlowEngine) {
     this.flowEngine = flowEngine;
+  }
+
+  setChatbotService(service: any) {
+    this.chatbotService = service;
   }
 
   setCampaignScheduler(scheduler: any) {
@@ -2803,6 +2809,32 @@ export class WhatsAppManager {
           console.log('✅ Flow executed - marking message as handled');
           this.db.prepare('UPDATE messages SET is_handled = 1, is_read = 1 WHERE id = ?').run(messageId);
           return;
+        }
+      }
+
+      // AI chatbot (מערך היח״ש). Runs only for incoming messages that no
+      // automation flow claimed, and only when explicitly enabled for this
+      // account. A chatbot failure must never break message persistence or the
+      // inbox, so it is fully contained here.
+      if (!isFromMe && this.chatbotService) {
+        try {
+          if (this.chatbotService.isEnabledFor(accountId)) {
+            // fromNumber is already resolved above (handles the @lid vs @c.us case).
+            const senderNumber = fromNumber;
+            console.log('🤖 Chatbot handling message from', senderNumber);
+            const result = await this.chatbotService.handleIncomingMessage(
+              accountId,
+              senderNumber,
+              msg.body || '',
+            );
+            if (result?.handled) {
+              this.db.prepare('UPDATE messages SET is_handled = 1, is_read = 1 WHERE id = ?').run(messageId);
+              return;
+            }
+            if (result?.error) console.error('🤖 Chatbot did not handle message:', result.error);
+          }
+        } catch (chatbotError) {
+          console.error('🤖 Chatbot error (message still saved):', chatbotError);
         }
       }
 

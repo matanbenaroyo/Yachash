@@ -9,6 +9,7 @@ import {
   Download,
   Flame,
   Workflow,
+  Bot,
   FileText,
   Terminal,
   UserPlus,
@@ -42,6 +43,7 @@ export default function Sidebar() {
     { name: t('warmup'), href: '/warmup', icon: Flame },
     { name: t('templates'), href: '/templates', icon: FileText },
     { name: language === 'he' ? 'סטטיסטיקות' : language === 'ar' ? 'إحصائيات' : 'Statistics', href: '/statistics', icon: BarChart3 },
+    { name: language === 'he' ? 'בוט היח״ש' : language === 'ar' ? 'روبوت الوحدة' : 'Unit Chatbot', href: '/chatbot', icon: Bot },
     { name: t('flows'), href: '/flows', icon: Workflow },
     // Only show Logs if user has log_access = true
     ...(hasLogAccess ? [{ name: language === 'he' ? 'לוגים' : language === 'ar' ? 'السجلات' : 'Logs', href: '/logs', icon: Terminal }] : []),

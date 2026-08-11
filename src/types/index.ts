@@ -359,6 +359,39 @@ export interface LicenseInfo {
 }
 
 // IPC Types
+// ==================== AI Chatbot (מערך היח״ש) ====================
+
+export interface ChatbotConfig {
+  enabled: boolean;
+  apiKey: string;
+  model: string;
+  accountIds: string[];
+  vehicleEntryStaffPhone: string;
+  generalStaffPhone: string;
+  openCallStaffPhone: string;
+  historyTurns: number;
+  greeting: string;
+}
+
+export interface ChatbotStatus {
+  enabled: boolean;
+  hasApiKey: boolean;
+  model: string;
+  knowledgeCounts: Record<string, number>;
+  conversations: number;
+  activeConversations: number;
+  openEscalations: number;
+  requests: number;
+}
+
+export interface ChatbotWorkflowInfo {
+  id: string;
+  intent: string;
+  label: string;
+  tools: string[];
+  requiredFields: Array<{ key: string; label: string }>;
+}
+
 export interface ElectronAPI {
   // License operations
   license: {
@@ -569,6 +602,28 @@ export interface ElectronAPI {
     update: (id: string, data: Partial<MessageTemplate>) => Promise<void>;
     delete: (id: string) => Promise<void>;
     getMediaFile: (mediaPath: string) => Promise<{ buffer: number[]; fileName: string } | null>;
+  };
+
+  // AI chatbot (מערך היח״ש) — config, knowledge and conversation inspection.
+  // Separate from the campaign surface above; see electron/chatbot/.
+  chatbot: {
+    getConfig: () => Promise<ChatbotConfig>;
+    saveConfig: (patch: Partial<ChatbotConfig>) => Promise<ChatbotConfig>;
+    getStatus: () => Promise<ChatbotStatus>;
+    getWorkflows: () => Promise<ChatbotWorkflowInfo[]>;
+    getConversations: (limit?: number) => Promise<any[]>;
+    getMessages: (conversationId: string) => Promise<Array<{ role: string; content: string; createdAt?: string }>>;
+    getEscalations: () => Promise<any[]>;
+    getRequests: () => Promise<any[]>;
+    getErrors: () => Promise<any[]>;
+    knowledge: {
+      list: (category?: string) => Promise<any[]>;
+      create: (entry: { category: string; title: string; content: string; metadata?: Record<string, unknown> }) => Promise<any>;
+      update: (id: string, patch: Record<string, unknown>) => Promise<any>;
+      delete: (id: string) => Promise<void>;
+    };
+    simulate: (phoneNumber: string, message: string) => Promise<{ handled: boolean; reply?: string; intent?: string; error?: string }>;
+    resetConversation: (phoneNumber: string) => Promise<void>;
   };
 
   // Event listeners

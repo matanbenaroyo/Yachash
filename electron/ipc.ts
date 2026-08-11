@@ -11,6 +11,10 @@ import { ScheduledCampaignChecker } from './services/ScheduledCampaignChecker';
 import { FlowEngine } from './services/FlowEngine';
 import { GroupCampaignScheduler } from './services/GroupCampaignScheduler';
 import { DuoPlusManager } from './services/DuoPlusManager';
+import { ChatbotService } from './chatbot/ChatbotService';
+import { KnowledgeService } from './chatbot/knowledge/KnowledgeService';
+import { getChatbotConfig, saveChatbotConfig } from './chatbot/config';
+import { WORKFLOWS } from './chatbot/workflows';
 import { logger } from './logger';
 import * as XLSX from 'xlsx';
 import fs from 'fs';
@@ -25,6 +29,8 @@ let scheduledCampaignChecker: ScheduledCampaignChecker;
 let flowEngine: FlowEngine;
 let groupCampaignScheduler: GroupCampaignScheduler;
 let duoplusManager: DuoPlusManager;
+let chatbotService: ChatbotService;
+let knowledgeService: KnowledgeService;
 
 // Helper function to normalize phone numbers for matching
 function normalizePhoneForMatching(phone: string): string[] {
@@ -153,6 +159,13 @@ async function initializeServices() {
   whatsappManager.setFlowEngine(flowEngine);
   console.log('🤖 FlowEngine initialized');
 
+  // AI chatbot (מערך היח״ש). Runs after FlowEngine in the incoming-message
+  // path, so existing automation flows keep priority. Does nothing unless it
+  // is explicitly enabled and an API key is configured.
+  chatbotService.setWhatsAppManager(whatsappManager);
+  whatsappManager.setChatbotService(chatbotService);
+  console.log('🤖 ChatbotService wired', chatbotService.getConfig().enabled ? '(enabled)' : '(disabled)');
+
   // Wire campaign scheduler so accounts trigger campaign resume on ready
   whatsappManager.setCampaignScheduler(campaignScheduler);
   
@@ -174,6 +187,11 @@ export function setupIPCHandlers() {
   // DuoPlus manager is lightweight (just reads/writes the `settings` table and
   // calls the DuoPlus REST API) so it doesn't need to wait for license validation.
   duoplusManager = new DuoPlusManager(db);
+
+  // Chatbot config/knowledge are plain DB reads, so the management UI works
+  // before any WhatsApp account connects.
+  chatbotService = new ChatbotService(db);
+  knowledgeService = new KnowledgeService(db);
 
   // Initialize only license manager (lightweight)
   licenseManager = new LicenseManager();
@@ -2852,6 +2870,96 @@ export function setupIPCHandlers() {
 
   ipcMain.handle('logs:clear', async () => {
     logger.clearLogs();
+  });
+
+  // ==================== AI CHATBOT (מערך היח״ש) ====================
+  // Config, knowledge and conversation inspection. Kept separate from the
+  // campaign handlers above — nothing here touches bulk sending.
+
+  ipcMain.handle('chatbot:getConfig', () => getChatbotConfig(db));
+
+  ipcMain.handle('chatbot:saveConfig', (_event, patch) => {
+    saveChatbotConfig(db, patch ?? {});
+    return getChatbotConfig(db);
+  });
+
+  ipcMain.handle('chatbot:getStatus', () => {
+    const config = getChatbotConfig(db);
+    const counts = knowledgeService.countByCategory();
+    const conv = db.prepare(`SELECT COUNT(*) AS n FROM chatbot_conversations`).get() as { n: number };
+    const active = db.prepare(`SELECT COUNT(*) AS n FROM chatbot_conversations WHERE status = 'active'`).get() as { n: number };
+    const esc = db.prepare(`SELECT COUNT(*) AS n FROM chatbot_escalations WHERE status != 'handled'`).get() as { n: number };
+    const req = db.prepare(`SELECT COUNT(*) AS n FROM chatbot_requests`).get() as { n: number };
+    return {
+      enabled: config.enabled,
+      hasApiKey: Boolean(config.apiKey),
+      model: config.model,
+      knowledgeCounts: counts,
+      conversations: conv?.n ?? 0,
+      activeConversations: active?.n ?? 0,
+      openEscalations: esc?.n ?? 0,
+      requests: req?.n ?? 0,
+    };
+  });
+
+  ipcMain.handle('chatbot:getWorkflows', () =>
+    WORKFLOWS.map(w => ({
+      id: w.id,
+      intent: w.intent,
+      label: w.label,
+      tools: w.tools,
+      requiredFields: w.requiredFields ?? [],
+    })),
+  );
+
+  ipcMain.handle('chatbot:getConversations', (_event, limit?: number) =>
+    chatbotService.getConversationManager().list(limit ?? 100),
+  );
+
+  ipcMain.handle('chatbot:getMessages', (_event, conversationId: string) =>
+    chatbotService.getConversationManager().messages(conversationId),
+  );
+
+  ipcMain.handle('chatbot:getEscalations', () =>
+    db.prepare(`SELECT * FROM chatbot_escalations ORDER BY created_at DESC LIMIT 200`).all(),
+  );
+
+  ipcMain.handle('chatbot:getRequests', () =>
+    db.prepare(`SELECT * FROM chatbot_requests ORDER BY created_at DESC LIMIT 200`).all(),
+  );
+
+  ipcMain.handle('chatbot:getErrors', () =>
+    db.prepare(`SELECT * FROM chatbot_errors ORDER BY created_at DESC LIMIT 100`).all(),
+  );
+
+  // ---- Knowledge management ----
+  ipcMain.handle('chatbot:knowledge:list', (_event, category?: string) =>
+    knowledgeService.list(category as any),
+  );
+
+  ipcMain.handle('chatbot:knowledge:create', (_event, entry) => knowledgeService.create(entry));
+
+  ipcMain.handle('chatbot:knowledge:update', (_event, id: string, patch) => {
+    knowledgeService.update(id, patch ?? {});
+    return knowledgeService.get(id);
+  });
+
+  ipcMain.handle('chatbot:knowledge:delete', (_event, id: string) => {
+    knowledgeService.delete(id);
+  });
+
+  /**
+   * Test console: runs a full turn (intent → workflow → tools → reply) without
+   * sending anything over WhatsApp, so the flow can be exercised safely.
+   */
+  ipcMain.handle('chatbot:simulate', async (_event, phoneNumber: string, message: string) => {
+    if (!chatbotService) return { handled: false, error: 'Chatbot service not initialized' };
+    return chatbotService.simulate(phoneNumber || 'test-console', message);
+  });
+
+  ipcMain.handle('chatbot:resetConversation', (_event, phoneNumber: string) => {
+    db.prepare(`UPDATE chatbot_conversations SET status = 'completed' WHERE phone_number = ? AND status = 'active'`)
+      .run(phoneNumber);
   });
 }
 
