@@ -7,7 +7,8 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "strict": false,
-    "target": "ES2020"
+    "target": "ES2020",
+    "outDir": "./dist-tsconfig-node"
   },
-  "include": ["vite.config.ts", "electron", "src/lib", "src/types"]
+  "include": ["vite.config.ts"]
 }

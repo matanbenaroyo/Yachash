@@ -4,6 +4,12 @@ import electron from 'vite-plugin-electron';
 import path from 'path';
 
 export default defineConfig({
+  // Emit relative asset URLs. The packaged app is loaded via
+  // mainWindow.loadFile(dist/index.html) over the file:// protocol, so the
+  // default absolute base ('/') would resolve /assets/* against the filesystem
+  // root and render a blank window. Vite forces base back to '/' in dev, so the
+  // dev server is unaffected.
+  base: './',
   plugins: [
     react(),
     electron([
@@ -24,6 +30,7 @@ export default defineConfig({
                 
                 // Externalize main dependencies (Supabase will be bundled)
                 const externalPackages = [
+                  '@anthropic-ai/sdk',
                   'whatsapp-web.js',
                   'puppeteer',
                   'qrcode',

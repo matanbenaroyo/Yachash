@@ -27,6 +27,43 @@ release
 # Database
 *.db
 *.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
 
 # Sessions
 sessions/
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# WhatsApp Web runtime state.
+# .wwebjs_auth holds LOGGED-IN WhatsApp sessions (cookies + LocalStorage) — committing
+# it would hand anyone with repo access control of the connected accounts.
+# .wwebjs_cache is just WhatsApp Web version snapshots; it was tracked upstream (~4.5 MB).
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Packaged installers / build output
+release/
+
+# Compiled TypeScript output.
+# Upstream committed the generated .js/.d.ts next to every .ts source. Vite resolves
+# .js BEFORE .ts, so those stale artifacts silently shadowed the real sources and
+# edits to .ts files never reached the build. Keep them out of git.
+*.tsbuildinfo
+/vite.config.js
+/vite.config.d.ts
+electron/**/*.js
+electron/**/*.d.ts
+src/**/*.js
+src/**/*.d.ts
+!src/vite-env.d.ts
+
+# Test fixtures generated during local smoke testing
+/test-data/
+
+# tsc -b output for the Node-side (vite.config.ts) composite project
+/dist-tsconfig-node/

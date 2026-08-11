@@ -6,6 +6,24 @@ import { setupIPCHandlers, campaignScheduler, warmUpService } from './ipc';
 import { logger } from './logger';
 import { setupAutoUpdater, setUpdaterMainWindow } from './updater';
 
+// Development uses an ISOLATED userData directory.
+//
+// Everything stateful hangs off app.getPath('userData'): leadsender.db, the
+// WhatsApp LocalAuth sessions/ folder, media/, chat-photos/ and .license. Without
+// this override a `npm run electron:dev` session shares all of it with the
+// INSTALLED LeadSender, so any dev experiment mutates real production data — and
+// because campaigns with status='running' auto-resume on startup, it could send
+// real messages to real contacts.
+//
+// Must run before app is ready and before anything reads userData (initDatabase
+// and the LicenseManager constructor both do). Production is unaffected.
+if (process.env.VITE_DEV_SERVER_URL) {
+  const devUserData = path.join(app.getPath('appData'), 'leadsender-dev');
+  fs.mkdirSync(devUserData, { recursive: true });
+  app.setPath('userData', devUserData);
+  console.log('🧪 Dev mode - isolated userData:', devUserData);
+}
+
 // Register custom protocol for serving local files (e.g. chat photos)
 protocol.registerSchemesAsPrivileged([
   { scheme: 'local-file', privileges: { bypassCSP: true, stream: true, supportFetchAPI: true } }
@@ -35,9 +53,24 @@ function createWindow() {
     ? path.join(process.cwd(), 'dist-electron', 'preload.js')
     : path.join(__dirname, 'preload.js');
     
+  // Production icon previously pointed at
+  //   process.resourcesPath/app.asar.unpacked/dist/assets/lead-icon-<hash>.png
+  // which never exists: asarUnpack only unpacks better-sqlite3 and whatsapp-web.js,
+  // so dist/assets is never written outside the asar. It also hardcoded a Vite
+  // content hash that changes whenever the image does. Resolve inside the asar
+  // (fs works on asar paths) and match the hash by pattern instead.
   const iconPath = isDev
     ? path.join(process.cwd(), 'src', 'images', 'lead-icon.png')
-    : path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'assets', 'lead-icon-BXeTX-9O.png');
+    : (() => {
+        const assetsDir = path.join(__dirname, '..', 'dist', 'assets');
+        try {
+          const match = fs.readdirSync(assetsDir).find(n => /^lead-icon-.*\.png$/.test(n));
+          if (match) return path.join(assetsDir, match);
+        } catch {
+          // fall through to Electron's default icon
+        }
+        return undefined;
+      })();
   
   console.log('Is Dev:', isDev);
   console.log('__dirname:', __dirname);

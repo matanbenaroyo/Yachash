@@ -1,7 +1,7 @@
 appId: com.leadsender.app
 productName: LeadSender
 directories:
-  output: dist
+  output: release
   buildResources: build
 files:
   - dist-electron
@@ -27,10 +27,19 @@ nsis:
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   deleteAppDataOnUninstall: false
-# Publish configuration removed - manual upload to GitHub Releases
-# This keeps the source code private while still enabling auto-updates
+# Fork-local publish target.
+#
+# This MUST NOT point at the original author's repositories. It previously read
+# owner: barelzrihan2002 / repo: leadsender-releases, which meant (a) a build run
+# with a GH_TOKEN in the environment could push artifacts to their repo, and
+# (b) a locally-built app would check THEIR release feed for updates and could
+# install their binary over this build.
+#
+# It now points at this fork's own repo so the electron-updater code path stays
+# functional, while the npm build scripts pass --publish never so nothing is ever
+# uploaded unless you explicitly ask for it.
 publish:
   provider: github
-  owner: barelzrihan2002
-  repo: leadsender-releases
+  owner: matanbenaroyo
+  repo: leadsender
   releaseType: release
