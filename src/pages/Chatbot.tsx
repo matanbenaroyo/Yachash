@@ -60,14 +60,26 @@ export default function Chatbot() {
   const [workflows, setWorkflows] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const api = (window as any).electron?.chatbot;
 
+  /**
+   * Loads config/status/workflows. Failures are surfaced rather than swallowed:
+   * without this the page sat on "טוען…" forever whenever an IPC call rejected,
+   * with nothing on screen to say why.
+   */
   const refresh = async () => {
     if (!api) return;
-    const [cfg, st, wf] = await Promise.all([api.getConfig(), api.getStatus(), api.getWorkflows()]);
-    setConfig(cfg);
-    setStatus(st);
-    setWorkflows(wf);
+    try {
+      const [cfg, st, wf] = await Promise.all([api.getConfig(), api.getStatus(), api.getWorkflows()]);
+      setConfig(cfg);
+      setStatus(st);
+      setWorkflows(wf);
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(String(e?.message ?? e));
+    }
   };
 
   useEffect(() => { refresh(); }, []);
@@ -89,6 +101,25 @@ export default function Chatbot() {
   if (!api) {
     return <div className="p-6 text-muted-foreground">ממשק הצ׳אטבוט אינו זמין.</div>;
   }
+
+  if (loadError) {
+    return (
+      <div className="p-6 space-y-3" dir="rtl">
+        <div className="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+          <div>
+            <div className="font-medium">טעינת עמוד הבוט נכשלה</div>
+            <div className="mt-1 font-mono text-xs break-all">{loadError}</div>
+            <div className="mt-2 text-xs">
+              אם מופיע "No handler registered" — סגור את האפליקציה והפעל מחדש עם <code>npm run electron:dev</code>.
+            </div>
+          </div>
+        </div>
+        <Button size="sm" onClick={refresh}><RefreshCw className="h-4 w-4 ml-1" /> נסה שוב</Button>
+      </div>
+    );
+  }
+
   if (!config) return <div className="p-6">טוען…</div>;
 
   const tabs: Array<{ id: TabId; label: string }> = [
