@@ -315,6 +315,10 @@ export async function initDatabase() {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // Wait for a lock instead of failing immediately. The database is opened from
+  // more than one place (app, maintenance scripts), and without this a
+  // concurrent write surfaces as SQLITE_BUSY mid-operation.
+  db.pragma('busy_timeout = 5000');
   db.pragma('encoding = "UTF-8"'); // Ensure UTF-8 encoding for Hebrew/Arabic support
 
   // Run schema
