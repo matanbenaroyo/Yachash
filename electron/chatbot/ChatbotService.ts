@@ -39,9 +39,16 @@ export class ChatbotService {
   private whatsappManager: any = null;
   /** Serializes turns per phone number so rapid messages don't interleave. */
   private inFlight: Map<string, Promise<unknown>> = new Map();
+  private resolveDb: () => any;
 
-  constructor(private db: any) {
-    this.conversations = new ConversationManager(db);
+  /** Accepts a connection or a getter — see KnowledgeService for why. */
+  constructor(dbOrGetter: any) {
+    this.resolveDb = typeof dbOrGetter === 'function' ? dbOrGetter : () => dbOrGetter;
+    this.conversations = new ConversationManager(this.resolveDb);
+  }
+
+  private get db(): any {
+    return this.resolveDb();
   }
 
   setWhatsAppManager(manager: any) {

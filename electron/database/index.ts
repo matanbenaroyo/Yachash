@@ -302,9 +302,71 @@ CREATE INDEX IF NOT EXISTS idx_warmup_messages_sent_at ON warmup_messages(sent_a
 
 `;
 
+/** Remembered so a broken connection can be reopened without restarting the app. */
+let currentDbPath: string | null = null;
+
+function applyPragmas(connection: BetterSqliteDatabase) {
+  connection.pragma('journal_mode = WAL');
+  connection.pragma('foreign_keys = ON');
+  // Wait for a lock instead of failing immediately. The database is opened from
+  // more than one place (app, maintenance scripts), and without this a
+  // concurrent write surfaces as SQLITE_BUSY mid-operation.
+  connection.pragma('busy_timeout = 5000');
+  connection.pragma('encoding = "UTF-8"');
+}
+
+/**
+ * True for errors that mean "this handle's view of the file is broken", as
+ * opposed to a genuine data problem. In WAL mode a long-lived connection keeps
+ * the -shm index memory-mapped; if that mapping is disturbed while the app is
+ * running (another process touching the sidecar files, an antivirus scanner
+ * holding them), SQLite reports SQLITE_CORRUPT even though the file on disk is
+ * perfectly intact — which is exactly what we observed.
+ */
+function isConnectionLevelCorruption(error: any): boolean {
+  const code = String(error?.code ?? '');
+  const message = String(error?.message ?? '');
+  return (
+    code === 'SQLITE_CORRUPT' ||
+    code === 'SQLITE_NOTADB' ||
+    code === 'SQLITE_IOERR' ||
+    /malformed|not a database|disk image/i.test(message)
+  );
+}
+
+/** Closes and reopens the connection, re-applying pragmas. */
+export function reopenDatabase(): void {
+  if (!currentDbPath) throw new Error('Database not initialized');
+  try { db?.close(); } catch { /* already unusable */ }
+  db = new Database(currentDbPath);
+  applyPragmas(db);
+  console.log('🔄 Database connection reopened');
+}
+
+/**
+ * Runs a database operation, and if it fails because the *connection* went bad,
+ * reopens and retries once.
+ *
+ * Without this the user sees "database disk image is malformed" and has to
+ * restart the whole app, even though the file is fine and a fresh handle works
+ * immediately. Genuine errors (bad SQL, constraint violations, real file
+ * damage that survives a reopen) still propagate.
+ */
+export function withDbRecovery<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error: any) {
+    if (!isConnectionLevelCorruption(error)) throw error;
+    console.warn('⚠️ Database connection looked corrupt, reopening:', error?.message);
+    reopenDatabase();
+    return operation();
+  }
+}
+
 export async function initDatabase() {
   const userDataPath = app.getPath('userData');
   const dbPath = path.join(userDataPath, 'leadsender.db');
+  currentDbPath = dbPath;
 
   // Ensure the directory exists
   const dbDir = path.dirname(dbPath);
@@ -315,9 +377,6 @@ export async function initDatabase() {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-  // Wait for a lock instead of failing immediately. The database is opened from
-  // more than one place (app, maintenance scripts), and without this a
-  // concurrent write surfaces as SQLITE_BUSY mid-operation.
   db.pragma('busy_timeout = 5000');
   db.pragma('encoding = "UTF-8"'); // Ensure UTF-8 encoding for Hebrew/Arabic support
 

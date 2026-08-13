@@ -1,5 +1,5 @@
 import { ipcMain, app, BrowserWindow } from 'electron';
-import { getDatabase } from './database/index';
+import { getDatabase, withDbRecovery } from './database/index';
 import { v4 as uuidv4 } from 'uuid';
 import type { Account, Campaign, Contact, Tag, Message } from '../src/types';
 import { WhatsAppManager } from './services/WhatsAppManager';
@@ -190,8 +190,10 @@ export function setupIPCHandlers() {
 
   // Chatbot config/knowledge are plain DB reads, so the management UI works
   // before any WhatsApp account connects.
-  chatbotService = new ChatbotService(db);
-  knowledgeService = new KnowledgeService(db);
+  // Pass the getter, not the handle: if a broken connection is reopened, these
+  // services must pick up the new one rather than keep using a dead handle.
+  chatbotService = new ChatbotService(getDatabase);
+  knowledgeService = new KnowledgeService(getDatabase);
 
   // Initialize only license manager (lightweight)
   licenseManager = new LicenseManager();
@@ -2876,14 +2878,17 @@ export function setupIPCHandlers() {
   // Config, knowledge and conversation inspection. Kept separate from the
   // campaign handlers above — nothing here touches bulk sending.
 
-  ipcMain.handle('chatbot:getConfig', () => getChatbotConfig(db));
+  ipcMain.handle('chatbot:getConfig', () => withDbRecovery(() => getChatbotConfig(getDatabase())));
 
-  ipcMain.handle('chatbot:saveConfig', (_event, patch) => {
-    saveChatbotConfig(db, patch ?? {});
-    return getChatbotConfig(db);
-  });
+  ipcMain.handle('chatbot:saveConfig', (_event, patch) => withDbRecovery(() => {
+    saveChatbotConfig(getDatabase(), patch ?? {});
+    return getChatbotConfig(getDatabase());
+  }));
 
-  ipcMain.handle('chatbot:getStatus', () => {
+  // Wrapped in withDbRecovery: this is the first thing the chatbot page calls,
+  // so a stale connection surfaced here as an unrecoverable page error.
+  ipcMain.handle('chatbot:getStatus', () => withDbRecovery(() => {
+    const db = getDatabase();
     const config = getChatbotConfig(db);
     const counts = knowledgeService.countByCategory();
     const conv = db.prepare(`SELECT COUNT(*) AS n FROM chatbot_conversations`).get() as { n: number };
@@ -2900,7 +2905,7 @@ export function setupIPCHandlers() {
       openEscalations: esc?.n ?? 0,
       requests: req?.n ?? 0,
     };
-  });
+  }));
 
   ipcMain.handle('chatbot:getWorkflows', () =>
     WORKFLOWS.map(w => ({
@@ -2913,31 +2918,31 @@ export function setupIPCHandlers() {
   );
 
   ipcMain.handle('chatbot:getConversations', (_event, limit?: number) =>
-    chatbotService.getConversationManager().list(limit ?? 100),
+    withDbRecovery(() => chatbotService.getConversationManager().list(limit ?? 100)),
   );
 
   ipcMain.handle('chatbot:getMessages', (_event, conversationId: string) =>
     chatbotService.getConversationManager().messages(conversationId),
   );
 
-  ipcMain.handle('chatbot:getEscalations', () =>
-    db.prepare(`SELECT * FROM chatbot_escalations ORDER BY created_at DESC LIMIT 200`).all(),
-  );
+  ipcMain.handle('chatbot:getEscalations', () => withDbRecovery(() =>
+    getDatabase().prepare(`SELECT * FROM chatbot_escalations ORDER BY created_at DESC LIMIT 200`).all(),
+  ));
 
-  ipcMain.handle('chatbot:getRequests', () =>
-    db.prepare(`SELECT * FROM chatbot_requests ORDER BY created_at DESC LIMIT 200`).all(),
-  );
+  ipcMain.handle('chatbot:getRequests', () => withDbRecovery(() =>
+    getDatabase().prepare(`SELECT * FROM chatbot_requests ORDER BY created_at DESC LIMIT 200`).all(),
+  ));
 
-  ipcMain.handle('chatbot:getErrors', () =>
-    db.prepare(`SELECT * FROM chatbot_errors ORDER BY created_at DESC LIMIT 100`).all(),
-  );
+  ipcMain.handle('chatbot:getErrors', () => withDbRecovery(() =>
+    getDatabase().prepare(`SELECT * FROM chatbot_errors ORDER BY created_at DESC LIMIT 100`).all(),
+  ));
 
   // ---- Knowledge management ----
   ipcMain.handle('chatbot:knowledge:list', (_event, category?: string) =>
-    knowledgeService.list(category as any),
+    withDbRecovery(() => knowledgeService.list(category as any)),
   );
 
-  ipcMain.handle('chatbot:knowledge:create', (_event, entry) => knowledgeService.create(entry));
+  ipcMain.handle('chatbot:knowledge:create', (_event, entry) => withDbRecovery(() => knowledgeService.create(entry)));
 
   ipcMain.handle('chatbot:knowledge:update', (_event, id: string, patch) => {
     knowledgeService.update(id, patch ?? {});
@@ -2951,7 +2956,7 @@ export function setupIPCHandlers() {
   // Paste a whole document; it is split into sections so retrieval returns the
   // relevant part instead of the entire file.
   ipcMain.handle('chatbot:knowledge:bulkImport', (_event, category: string, text: string) =>
-    knowledgeService.bulkImport(category as any, text ?? ''),
+    withDbRecovery(() => knowledgeService.bulkImport(category as any, text ?? '')),
   );
 
   ipcMain.handle('chatbot:knowledge:deleteDemo', () => {

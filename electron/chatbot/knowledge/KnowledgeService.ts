@@ -14,7 +14,20 @@ import { randomUUID } from 'crypto';
 import type { KnowledgeCategory, KnowledgeEntry, KnowledgeSearchParams } from '../types';
 
 export class KnowledgeService {
-  constructor(private db: any) {}
+  private resolveDb: () => any;
+
+  /**
+   * Accepts a connection or a getter. The getter form matters: if the app
+   * reopens a broken connection, a cached handle would keep throwing, while a
+   * getter always resolves the live one.
+   */
+  constructor(dbOrGetter: any) {
+    this.resolveDb = typeof dbOrGetter === 'function' ? dbOrGetter : () => dbOrGetter;
+  }
+
+  private get db(): any {
+    return this.resolveDb();
+  }
 
   /**
    * Keyword search scoped to one category. Scoring is intentionally simple

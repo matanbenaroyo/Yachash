@@ -13,7 +13,16 @@ import type { ChatbotIntent, ConversationState, ConversationTurn } from './types
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 export class ConversationManager {
-  constructor(private db: any) {}
+  private resolveDb: () => any;
+
+  /** Accepts a connection or a getter — see KnowledgeService for why. */
+  constructor(dbOrGetter: any) {
+    this.resolveDb = typeof dbOrGetter === 'function' ? dbOrGetter : () => dbOrGetter;
+  }
+
+  private get db(): any {
+    return this.resolveDb();
+  }
 
   /** Returns the live conversation for a phone number, creating one if needed. */
   getOrCreate(accountId: string, phoneNumber: string, now: Date = new Date()): ConversationState {
