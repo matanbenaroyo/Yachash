@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow, Menu, protocol } from 'electron';
-import { initDatabase } from './database/index';
+import { initDatabase, closeDatabase } from './database/index';
 import { setupIPCHandlers, campaignScheduler, warmUpService } from './ipc';
 import { logger } from './logger';
 import { setupAutoUpdater, setUpdaterMainWindow } from './updater';
@@ -22,6 +22,25 @@ if (process.env.VITE_DEV_SERVER_URL) {
   fs.mkdirSync(devUserData, { recursive: true });
   app.setPath('userData', devUserData);
   console.log('🧪 Dev mode - isolated userData:', devUserData);
+}
+
+// Only one copy of the app may run at a time.
+//
+// Two instances share one SQLite file and one WhatsApp session folder. Both keep
+// a long-lived connection with the WAL memory-mapped, and the second one racing
+// the first over those sidecars is what surfaces as "database disk image is
+// malformed" on a file that is actually intact. Focus the existing window
+// instead of opening a second copy.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  console.log('⚠️ LeadSender is already running - focusing the existing window');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
 }
 
 // Register custom protocol for serving local files (e.g. chat photos)
@@ -195,6 +214,10 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // app.quit() above is asynchronous, so 'ready' can still fire in the losing
+  // instance. Nothing below may touch the database or the session folder.
+  if (!hasSingleInstanceLock) return;
+
   // Register protocol handler for local files (chat photos, etc.)
   protocol.handle('local-file', (request) => {
     // URL comes as local-file:///C:/Users/... — strip scheme and leading slash before drive letter
@@ -253,6 +276,10 @@ app.on('before-quit', () => {
   // Optional: You could pause everything here if you want manual resume instead:
   // campaignScheduler.pauseAll();
   // warmUpService.stopAll();
+
+  // Fold the WAL back into the database file and close cleanly, so the next
+  // launch opens a single consistent file instead of replaying a large WAL.
+  if (hasSingleInstanceLock) closeDatabase();
 });
 
 export { mainWindow };

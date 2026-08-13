@@ -313,6 +313,141 @@ function applyPragmas(connection: BetterSqliteDatabase) {
   // concurrent write surfaces as SQLITE_BUSY mid-operation.
   connection.pragma('busy_timeout = 5000');
   connection.pragma('encoding = "UTF-8"');
+  // Drain the WAL more eagerly than the 1000-page default. The app holds one
+  // long-lived connection, so a checkpoint can only run when it happens to be
+  // idle; at the default threshold the WAL grew to megabytes and stayed there,
+  // which is the state every corruption report so far has been found in.
+  connection.pragma('wal_autocheckpoint = 256');
+}
+
+/** Opens `candidatePath` briefly to check whether it is a sound database. */
+function isSoundDatabaseFile(candidatePath: string): boolean {
+  let probe: BetterSqliteDatabase | null = null;
+  try {
+    probe = new Database(candidatePath);
+    const result = probe.pragma('quick_check') as Array<{ quick_check: string }>;
+    return result?.[0]?.quick_check === 'ok';
+  } catch {
+    return false;
+  } finally {
+    try { probe?.close(); } catch { /* nothing left to close */ }
+  }
+}
+
+/** Renames a file out of the way, keeping it for inspection. Never throws. */
+function moveAside(filePath: string, suffix: string): void {
+  if (!fs.existsSync(filePath)) return;
+  try {
+    fs.renameSync(filePath, `${filePath}.${suffix}`);
+  } catch (error) {
+    console.warn(`⚠️ Could not move ${path.basename(filePath)} aside:`, error);
+  }
+}
+
+/** Backups, newest first. */
+function backupCandidates(backupDir: string): string[] {
+  if (!fs.existsSync(backupDir)) return [];
+  try {
+    return fs
+      .readdirSync(backupDir)
+      .filter(name => name.startsWith('leadsender.db') && !/-wal|-shm/.test(name))
+      .map(name => path.join(backupDir, name))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Opens the database, recovering instead of throwing when it will not open.
+ *
+ * `withDbRecovery` protects queries made once the app is running, but the very
+ * first open had no such guard: a single bad startup left the app dead on
+ * launch with a "disk image is malformed" dialog and no way forward. Recovery
+ * escalates only as far as it must, and never discards anything silently —
+ * every file it sets aside is kept next to the database.
+ */
+function openDatabaseResiliently(dbPath: string): BetterSqliteDatabase {
+  try {
+    const connection = new Database(dbPath);
+    applyPragmas(connection);
+    return connection;
+  } catch (error: any) {
+    if (!isConnectionLevelCorruption(error)) throw error;
+    console.error('🚨 Database did not open:', error?.message);
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(path.dirname(dbPath), 'backups');
+  try { fs.mkdirSync(backupDir, { recursive: true }); } catch { /* best effort */ }
+
+  // Step 1: the sidecars. An un-checkpointed -wal plus a -shm left by a process
+  // that died mid-write is by far the most common cause, and the main file is
+  // usually intact underneath. Copy them off before retrying without them.
+  for (const sidecar of [`${dbPath}-shm`, `${dbPath}-wal`]) {
+    if (!fs.existsSync(sidecar)) continue;
+    try {
+      fs.copyFileSync(sidecar, path.join(backupDir, `${path.basename(sidecar)}.${stamp}`));
+    } catch { /* the move below still preserves it */ }
+    moveAside(sidecar, `quarantined-${stamp}`);
+  }
+  try {
+    const connection = new Database(dbPath);
+    applyPragmas(connection);
+    console.log('✅ Database recovered by setting stale WAL sidecars aside');
+    return connection;
+  } catch (error: any) {
+    if (!isConnectionLevelCorruption(error)) throw error;
+    console.error('🚨 Database still unreadable without its sidecars:', error?.message);
+  }
+
+  // Step 2: the file itself is damaged. Fall back to the newest backup that
+  // actually passes a check — an unverified backup is not a recovery.
+  try {
+    fs.copyFileSync(dbPath, path.join(backupDir, `leadsender.db.corrupt-${stamp}`));
+  } catch { /* the move below still preserves it */ }
+  for (const candidate of backupCandidates(backupDir)) {
+    if (!isSoundDatabaseFile(candidate)) continue;
+    try {
+      moveAside(dbPath, `corrupt-${stamp}`);
+      fs.copyFileSync(candidate, dbPath);
+      const connection = new Database(dbPath);
+      applyPragmas(connection);
+      console.log(`✅ Database restored from backup: ${path.basename(candidate)}`);
+      return connection;
+    } catch (error) {
+      console.warn(`⚠️ Backup ${path.basename(candidate)} could not be restored:`, error);
+    }
+  }
+
+  // Step 3: nothing salvageable. An empty database that the schema can rebuild
+  // beats an app that refuses to start; the damaged file is kept for recovery.
+  moveAside(dbPath, `corrupt-${stamp}`);
+  const connection = new Database(dbPath);
+  applyPragmas(connection);
+  console.warn('⚠️ No usable backup found — started an empty database. The damaged file was kept alongside it.');
+  return connection;
+}
+
+/**
+ * Folds the WAL back into the main database file.
+ *
+ * Called on the way out so the app leaves a single consistent file behind
+ * rather than a large WAL for the next launch to replay.
+ */
+export function checkpointDatabase(): void {
+  if (!db) return;
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch (error) {
+    console.warn('⚠️ WAL checkpoint on shutdown failed:', error);
+  }
+}
+
+/** Closes the database cleanly, checkpointing first. */
+export function closeDatabase(): void {
+  checkpointDatabase();
+  try { db?.close(); } catch { /* already gone */ }
 }
 
 /**
@@ -374,11 +509,7 @@ export async function initDatabase() {
     fs.mkdirSync(dbDir, { recursive: true });
   }
 
-  db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('busy_timeout = 5000');
-  db.pragma('encoding = "UTF-8"'); // Ensure UTF-8 encoding for Hebrew/Arabic support
+  db = openDatabaseResiliently(dbPath);
 
   // Run schema
   db.exec(SCHEMA);

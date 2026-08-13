@@ -121,6 +121,41 @@ Inside whichever directory is active:
 
 To reset the dev sandbox: close the app and delete `%APPDATA%\leadsender-dev`.
 
+### If the app reports "database disk image is malformed"
+
+Usually the file is fine and the *connection* is not. The app now handles this itself,
+at three levels:
+
+| Level | Behaviour |
+|---|---|
+| While running | `withDbRecovery` reopens the connection and retries the query once |
+| At startup | `initDatabase` sets stale `-wal`/`-shm` aside, then falls back to the newest backup that passes `quick_check`, then to an empty database — it never leaves the app unable to start |
+| On quit | The WAL is checkpointed back into `leadsender.db`, so the next launch opens one consistent file |
+
+Nothing is deleted during recovery. Everything set aside is kept in
+`%APPDATA%\leadsender-dev\backups\` with a timestamp, so a database can always be
+restored by copying a backup over `leadsender.db` while the app is closed.
+
+Two causes are now designed out rather than handled:
+
+- **Two copies running at once.** They shared one database and one WhatsApp session
+  folder, each with the WAL memory-mapped. `app.requestSingleInstanceLock()` in
+  `electron/main.ts` means the second launch focuses the existing window instead.
+- **An oversized WAL.** SQLite checkpoints every 1000 pages by default, but only when
+  the connection is idle — the app holds one long-lived connection, so the WAL reached
+  ~4 MB and stayed there. `wal_autocheckpoint = 256` keeps it around 1 MB.
+
+To verify the database by hand, with the app closed:
+
+```bash
+npx electron -e "const D=require('better-sqlite3');const d=new D(process.env.APPDATA+'/leadsender-dev/leadsender.db');console.log(d.pragma('integrity_check'));process.exit(0)"
+```
+
+**Do not force-kill the app** (`taskkill /F`, End Task) and do not run write scripts
+against the database while it is open — both leave a WAL that a later launch has to
+replay, which is how this state arises in the first place. Close it from its window,
+or with `Get-Process electron | ForEach-Object { $_.CloseMainWindow() }`.
+
 ---
 
 ## 7. Never commit these
