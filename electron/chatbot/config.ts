@@ -5,6 +5,7 @@
  */
 import type { ChatbotConfig } from './types';
 import { DEFAULT_SENIOR_STAFF_ROUTING, normalizePhone, type SeniorStaffRoute } from './seniorStaff';
+import { DEFAULT_FYI_SENDERS, DEFAULT_FYI_GROUPS, type FyiSender, type FyiGroup } from './fyi';
 
 const PREFIX = 'chatbot_';
 
@@ -24,6 +25,9 @@ const DEFAULTS: ChatbotConfig = {
   historyTurns: 12,
   greeting: DEFAULT_GREETING,
   seniorStaffRouting: DEFAULT_SENIOR_STAFF_ROUTING,
+  fyiSenders: DEFAULT_FYI_SENDERS,
+  fyiGroups: DEFAULT_FYI_GROUPS,
+  fyiDigestTime: '16:00',
 };
 
 export function getChatbotConfig(db: any): ChatbotConfig {
@@ -68,6 +72,45 @@ export function getChatbotConfig(db: any): ChatbotConfig {
     seniorStaffRouting = DEFAULT_SENIOR_STAFF_ROUTING;
   }
 
+  // Same defensive treatment as the routing table: a corrupted value must not
+  // silently disable FYI broadcasting or, worse, widen who may send one.
+  let fyiSenders: FyiSender[] = DEFAULT_FYI_SENDERS;
+  try {
+    const raw = map.get(PREFIX + 'fyi_senders');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed
+          .filter((r: any) => r && r.phone)
+          .map((r: any) => ({ phone: normalizePhone(r.phone), name: String(r.name ?? ''), role: String(r.role ?? '') }))
+          .filter((r: FyiSender) => r.phone.length >= 9);
+        // An empty list is a legitimate choice (nobody may broadcast), but only
+        // when it was stored deliberately as an empty array.
+        if (cleaned.length || parsed.length === 0) fyiSenders = cleaned;
+      }
+    }
+  } catch {
+    fyiSenders = DEFAULT_FYI_SENDERS;
+  }
+
+  let fyiGroups: FyiGroup[] = DEFAULT_FYI_GROUPS;
+  try {
+    const raw = map.get(PREFIX + 'fyi_groups');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed
+          .filter((g: any) => g && g.chatId)
+          .map((g: any) => ({ chatId: String(g.chatId).trim(), label: String(g.label ?? '') }));
+        if (cleaned.length || parsed.length === 0) fyiGroups = cleaned;
+      }
+    }
+  } catch {
+    fyiGroups = DEFAULT_FYI_GROUPS;
+  }
+
+  const digestTime = (read('fyiDigestTime', '16:00') as string).trim();
+
   return {
     enabled: read('enabled', '0') === '1',
     apiKey: read('apiKey', DEFAULTS.apiKey) as string,
@@ -79,6 +122,9 @@ export function getChatbotConfig(db: any): ChatbotConfig {
     historyTurns: Number.isFinite(historyTurns) && historyTurns > 0 ? historyTurns : DEFAULTS.historyTurns,
     greeting: (read('greeting', DEFAULTS.greeting) as string) || DEFAULTS.greeting,
     seniorStaffRouting,
+    fyiSenders,
+    fyiGroups,
+    fyiDigestTime: /^\d{1,2}:\d{2}$/.test(digestTime) ? digestTime : '16:00',
   };
 }
 
@@ -105,7 +151,22 @@ export function saveChatbotConfig(db: any, patch: Partial<ChatbotConfig>): void 
                     phone: normalizePhone(r.phone),
                   })),
                 )
-              : String(value);
+              : key === 'fyiSenders'
+                ? JSON.stringify(
+                    (Array.isArray(value) ? value : []).map((r: any) => ({
+                      phone: normalizePhone(r.phone),
+                      name: String(r.name ?? ''),
+                      role: String(r.role ?? ''),
+                    })),
+                  )
+                : key === 'fyiGroups'
+                  ? JSON.stringify(
+                      (Array.isArray(value) ? value : []).map((g: any) => ({
+                        chatId: String(g.chatId ?? '').trim(),
+                        label: String(g.label ?? ''),
+                      })),
+                    )
+                  : String(value);
       upsert.run(PREFIX + toSnake(key), stored);
     }
   });

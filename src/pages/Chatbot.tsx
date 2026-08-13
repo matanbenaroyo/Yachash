@@ -51,7 +51,7 @@ const CATEGORIES = [
   },
 ] as const;
 
-type TabId = 'settings' | 'knowledge' | 'conversations' | 'inbox' | 'test';
+type TabId = 'settings' | 'knowledge' | 'fyi' | 'contacts' | 'conversations' | 'inbox' | 'test';
 
 export default function Chatbot() {
   const [tab, setTab] = useState<TabId>('settings');
@@ -125,6 +125,8 @@ export default function Chatbot() {
   const tabs: Array<{ id: TabId; label: string }> = [
     { id: 'settings', label: 'הגדרות' },
     { id: 'knowledge', label: 'מאגר ידע' },
+    { id: 'fyi', label: 'הפצות מידע' },
+    { id: 'contacts', label: 'אנשי קשר' },
     { id: 'conversations', label: 'שיחות' },
     { id: 'inbox', label: 'פניות והסלמות' },
     { id: 'test', label: 'בדיקה' },
@@ -182,6 +184,8 @@ export default function Chatbot() {
 
       {tab === 'settings' && <SettingsTab config={config} save={save} saving={saving} workflows={workflows} />}
       {tab === 'knowledge' && <KnowledgeTab api={api} onChange={refresh} />}
+      {tab === 'fyi' && <FyiTab api={api} />}
+      {tab === 'contacts' && <ContactsTab api={api} />}
       {tab === 'conversations' && <ConversationsTab api={api} />}
       {tab === 'inbox' && <InboxTab api={api} />}
       {tab === 'test' && <TestTab api={api} />}
@@ -299,6 +303,68 @@ function SettingsTab({ config, save, saving, workflows }: any) {
               />
             </div>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">הפצת מידע - FYI</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            רק המספרים ברשימה הזו רשאים לשלוח הפצת מידע. כל אחד אחר יקבל סירוב מנומס.
+          </p>
+
+          <div>
+            <Label>קבוצות יעד להפצה</Label>
+            {(form.fyiGroups ?? []).map((g: any, i: number) => (
+              <div key={i} className="grid grid-cols-1 md:grid-cols-[1fr_14rem] gap-2 mt-2">
+                <Input
+                  value={g.chatId ?? ''} placeholder="120363...@g.us"
+                  onChange={e => { const n = [...form.fyiGroups]; n[i] = { ...n[i], chatId: e.target.value }; set('fyiGroups', n); }}
+                />
+                <Input
+                  value={g.label ?? ''} placeholder="שם הקבוצה"
+                  onChange={e => { const n = [...form.fyiGroups]; n[i] = { ...n[i], label: e.target.value }; set('fyiGroups', n); }}
+                />
+              </div>
+            ))}
+            <Button size="sm" variant="outline" className="mt-2"
+              onClick={() => set('fyiGroups', [...(form.fyiGroups ?? []), { chatId: '', label: '' }])}>
+              <Plus className="h-4 w-4 ml-1" /> הוסף קבוצה
+            </Button>
+          </div>
+
+          <div>
+            <Label htmlFor="digest">שעת סיכום יומי</Label>
+            <Input id="digest" className="max-w-[8rem]" value={form.fyiDigestTime ?? ''} placeholder="16:00"
+              onChange={e => set('fyiDigestTime', e.target.value)} />
+            <p className="text-xs text-muted-foreground mt-1">
+              כל יום בשעה הזו נשלח לקבוצות סיכום של ההפצות מ-24 השעות האחרונות.
+            </p>
+          </div>
+
+          <div>
+            <Label>מורשים לשלוח ({(form.fyiSenders ?? []).length})</Label>
+            <div className="space-y-2 mt-2 max-h-[22rem] overflow-auto pl-1">
+              {(form.fyiSenders ?? []).map((r: any, i: number) => (
+                <div key={i} className="grid grid-cols-1 md:grid-cols-[11rem_1fr_1fr_2rem] gap-2">
+                  <Input value={r.phone ?? ''} placeholder="972501234567"
+                    onChange={e => { const n = [...form.fyiSenders]; n[i] = { ...n[i], phone: e.target.value }; set('fyiSenders', n); }} />
+                  <Input value={r.name ?? ''} placeholder="שם"
+                    onChange={e => { const n = [...form.fyiSenders]; n[i] = { ...n[i], name: e.target.value }; set('fyiSenders', n); }} />
+                  <Input value={r.role ?? ''} placeholder="תפקיד"
+                    onChange={e => { const n = [...form.fyiSenders]; n[i] = { ...n[i], role: e.target.value }; set('fyiSenders', n); }} />
+                  <Button size="sm" variant="ghost"
+                    onClick={() => set('fyiSenders', form.fyiSenders.filter((_: any, j: number) => j !== i))}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <Button size="sm" variant="outline" className="mt-2"
+              onClick={() => set('fyiSenders', [...(form.fyiSenders ?? []), { phone: '', name: '', role: '' }])}>
+              <Plus className="h-4 w-4 ml-1" /> הוסף מורשה
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -547,6 +613,105 @@ function InboxTab({ api }: any) {
           ))}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function FyiTab({ api }: any) {
+  const [items, setItems] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => setItems(await api.getFyiMessages());
+  useEffect(() => { load(); }, []);
+
+  const sendDigest = async () => {
+    setBusy(true);
+    try {
+      const res = await api.sendDigestNow();
+      if (res.ok) toast.success('הסיכום נשלח (' + res.count + ' הודעות)', res.delivered.join(', '));
+      else toast.error('הסיכום לא נשלח', res.error || 'אין הודעות ב-24 השעות האחרונות');
+      await load();
+    } catch (e: any) {
+      toast.error('שגיאה', String(e?.message ?? e));
+    } finally { setBusy(false); }
+  };
+
+  const delivered = (m: any) => {
+    try { return (JSON.parse(m.delivered_to || '[]') as string[]).join(', ') || '—'; }
+    catch { return '—'; }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          הפצות מידע שהתקבלו מהמורשים והועברו לקבוצות.
+        </p>
+        <Button size="sm" onClick={sendDigest} disabled={busy}>
+          <Send className="h-4 w-4 ml-1" /> {busy ? 'שולח…' : 'שלח סיכום עכשיו'}
+        </Button>
+      </div>
+
+      {items.length === 0 && <p className="text-sm text-muted-foreground">עדיין לא התקבלו הפצות מידע.</p>}
+      {items.map(m => (
+        <Card key={m.id}>
+          <CardContent className="pt-4 space-y-1">
+            <div className="flex justify-between items-start gap-2">
+              <div className="font-medium">{m.subject || '(ללא נושא)'}</div>
+              <Badge variant={m.status === 'sent' ? 'default' : m.status === 'partial' ? 'secondary' : 'destructive'}>
+                {m.status === 'sent' ? 'הופץ' : m.status === 'partial' ? 'הופץ חלקית' : m.status === 'failed' ? 'נכשל' : m.status}
+              </Badge>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {m.sender_name}{m.sender_role ? ' — ' + m.sender_role : ''} · {m.sender_phone} · {m.created_at}
+            </div>
+            {m.audience && <div className="text-sm"><span className="text-muted-foreground">אוכלוסיה: </span>{m.audience}</div>}
+            {m.highlights && <div className="text-sm whitespace-pre-wrap"><span className="text-muted-foreground">דגשים: </span>{m.highlights}</div>}
+            {m.tagav && <div className="text-sm"><span className="text-muted-foreground">תג״ב: </span>{m.tagav}</div>}
+            <div className="text-xs text-muted-foreground">
+              נשלח ל: {delivered(m)}{m.digest_sent_at ? ' · נכלל בסיכום' : ''}
+            </div>
+            {m.error && <div className="text-xs text-red-600">{m.error}</div>}
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function ContactsTab({ api }: any) {
+  const [items, setItems] = useState<any[]>([]);
+  useEffect(() => { api.getKnownContacts().then(setItems); }, []);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">
+        אנשי קשר שפנו לבוט ומסרו את פרטיהם. הבוט לא מבקש אותם שוב.
+      </p>
+      {items.length === 0 && <p className="text-sm text-muted-foreground">אין עדיין אנשי קשר.</p>}
+      {items.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-muted-foreground">
+              <tr className="text-right">
+                <th className="p-2">שם</th><th className="p-2">מספר אישי</th>
+                <th className="p-2">דרגה</th><th className="p-2">טלפון</th><th className="p-2">עודכן</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map(c => (
+                <tr key={c.phone_number} className="border-t">
+                  <td className="p-2">{c.full_name || '—'}</td>
+                  <td className="p-2">{c.personal_number || '—'}</td>
+                  <td className="p-2">{c.rank || '—'}</td>
+                  <td className="p-2 font-mono text-xs">{c.phone_number}</td>
+                  <td className="p-2 text-xs text-muted-foreground">{c.updated_at}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -15,6 +15,12 @@ import {
   renderVehicleEntryForm,
 } from '../workflows/vehicleEntryFormat';
 import { buildRankMenu, resolveRoute } from '../seniorStaff';
+import {
+  FYI_FORMAT,
+  findSender,
+  parseFyiForm,
+  renderFyiBroadcast,
+} from '../fyi';
 
 function knowledge(ctx: WorkflowContext) {
   return new KnowledgeService(ctx.db);
@@ -196,6 +202,164 @@ const sendVehicleEntryRequest: ChatbotTool = {
     required: ['filledForm'],
   },
   execute: async (input, ctx) => submitVehicleEntry(input, ctx),
+};
+
+const saveContactDetails: ChatbotTool = {
+  name: 'saveContactDetails',
+  description:
+    'Stores the details of the person you are talking to (name, personal number, rank) so they are ' +
+    'never asked again. Call this as soon as she gives them. Partial is fine — pass what you have.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      fullName: { type: 'string', description: 'שם מלא' },
+      personalNumber: { type: 'string', description: 'מספר אישי' },
+      rank: { type: 'string', description: 'דרגה' },
+    },
+    required: [],
+  },
+  execute: (input, ctx) => {
+    const name = String(input.fullName ?? '').trim();
+    const personal = String(input.personalNumber ?? '').trim();
+    const rank = String(input.rank ?? '').trim();
+    if (!name && !personal && !rank) return { ok: false, error: 'לא התקבלו פרטים לשמירה' };
+
+    // COALESCE(NULLIF(...)) keeps an existing value when this turn supplied a
+    // blank one, so a partial update never erases what we already knew.
+    ctx.db
+      .prepare(
+        `INSERT INTO chatbot_known_contacts (phone_number, full_name, personal_number, rank)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(phone_number) DO UPDATE SET
+           full_name       = COALESCE(NULLIF(excluded.full_name, ''), chatbot_known_contacts.full_name),
+           personal_number = COALESCE(NULLIF(excluded.personal_number, ''), chatbot_known_contacts.personal_number),
+           rank            = COALESCE(NULLIF(excluded.rank, ''), chatbot_known_contacts.rank),
+           updated_at      = CURRENT_TIMESTAMP`,
+      )
+      .run(ctx.phoneNumber, name, personal, rank);
+
+    return { ok: true, data: { saved: { fullName: name, personalNumber: personal, rank } } };
+  },
+};
+
+const getFyiFormat: ChatbotTool = {
+  name: 'getFyiFormat',
+  description:
+    'Returns the blank "פורמט הפצת מידע - FYI" form. Only authorized senders may use it — this tool ' +
+    'checks that and returns ok:false for anyone else. Send the returned text EXACTLY as-is.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: (_input, ctx) => {
+    const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
+    if (!sender) {
+      return {
+        ok: false,
+        error: 'המספר הזה אינו מורשה לשלוח הפצת מידע. אל תשלח את הפורמט, והסבר בנימוס שההרשאה שמורה לסגל בלבד.',
+      };
+    }
+    return { ok: true, data: { format: FYI_FORMAT, senderName: sender.name, senderRole: sender.role } };
+  },
+};
+
+const broadcastFyi: ChatbotTool = {
+  name: 'broadcastFyi',
+  description:
+    'Broadcasts a filled FYI form to the unit WhatsApp groups. Pass the sender\'s message verbatim as ' +
+    'filledForm, and your lightly edited version of each field in editedFields (fix wording, spelling and ' +
+    'formatting only — never add, remove or reinterpret information). Authorization and completeness are ' +
+    'enforced here: an unauthorized sender or a form missing mandatory fields is rejected and nothing is sent.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      filledForm: { type: 'string', description: 'The form exactly as the sender wrote it' },
+      editedFields: {
+        type: 'object',
+        description: 'Lightly cleaned-up values; omit a field to use the original',
+        properties: {
+          'נושא ההודעה': { type: 'string' },
+          'אוכלוסיה': { type: 'string' },
+          'דגשים': { type: 'string' },
+          'תג״ב': { type: 'string' },
+        },
+      },
+    },
+    required: ['filledForm'],
+  },
+  execute: async (input, ctx) => {
+    // 1. Authorization — code-side, never a prompt decision.
+    const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
+    if (!sender) {
+      return { ok: false, error: 'המספר הזה אינו מורשה לשלוח הפצת מידע. לא נשלח דבר.' };
+    }
+
+    // 2. Completeness — also code-side.
+    const parsed = parseFyiForm(String(input.filledForm ?? ''));
+    if (!parsed.complete) {
+      return {
+        ok: false,
+        error: `הפורמט לא מלא. חסר: ${parsed.missing.join(', ')}. בקשי מהשולח/ת רק את מה שחסר.`,
+        data: { missingFields: parsed.missing },
+      };
+    }
+
+    // 3. Merge the model's edits over the parsed original. Only known fields are
+    //    taken, so the model cannot introduce a field that was never sent.
+    const edited: Record<string, string> = { ...parsed.values };
+    const proposals = (input.editedFields ?? {}) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(proposals)) {
+      if (typeof v === 'string' && v.trim() && parsed.values[k] !== undefined) edited[k] = v.trim();
+    }
+
+    const body = renderFyiBroadcast(edited, sender);
+    const groups = ctx.config.fyiGroups.filter(g => g.chatId);
+    if (!groups.length) return { ok: false, error: 'לא הוגדרו קבוצות להפצה. ההודעה לא נשלחה.' };
+
+    const id = randomUUID();
+    ctx.db
+      .prepare(
+        `INSERT INTO chatbot_fyi_messages
+           (id, sender_phone, sender_name, sender_role, subject, audience, highlights, tagav, raw_text, broadcast_text, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      )
+      .run(
+        id, sender.phone, sender.name, sender.role,
+        edited['נושא ההודעה'] ?? '', edited['אוכלוסיה'] ?? '',
+        edited['דגשים'] ?? '', edited['תג״ב'] ?? '',
+        String(input.filledForm ?? ''), body,
+      );
+
+    // 4. Deliver. Partial success is reported honestly rather than as success.
+    const delivered: string[] = [];
+    const failed: string[] = [];
+    for (const g of groups) {
+      try {
+        await ctx.sendWhatsApp(g.chatId, body);
+        delivered.push(g.label || g.chatId);
+      } catch (e: any) {
+        failed.push(`${g.label || g.chatId} (${e?.message ?? e})`);
+      }
+    }
+
+    ctx.db
+      .prepare(`UPDATE chatbot_fyi_messages SET status = ?, delivered_to = ?, error = ? WHERE id = ?`)
+      .run(
+        failed.length === 0 ? 'sent' : delivered.length ? 'partial' : 'failed',
+        JSON.stringify(delivered),
+        failed.length ? failed.join('; ') : null,
+        id,
+      );
+
+    if (!delivered.length) {
+      return { ok: false, error: `ההפצה נכשלה לכל הקבוצות: ${failed.join('; ')}` };
+    }
+    return {
+      ok: true,
+      data: {
+        deliveredTo: delivered,
+        failedGroups: failed,
+        note: failed.length ? 'חלק מהקבוצות נכשלו — ציין זאת למשתמשת' : undefined,
+      },
+    };
+  },
 };
 
 const getSeniorStaffOptions: ChatbotTool = {
@@ -425,6 +589,9 @@ export async function submitVehicleEntry(
 }
 
 export const TOOLS: ChatbotTool[] = [
+  saveContactDetails,
+  getFyiFormat,
+  broadcastFyi,
   getVehicleEntryFormat,
   searchGeneralKnowledge,
   searchOrders,

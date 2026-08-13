@@ -80,6 +80,33 @@ const developmentTracks: WorkflowDefinition = {
   tools: ['searchDevelopmentTracks', 'escalateToStaff'],
 };
 
+const fyiBroadcast: WorkflowDefinition = {
+  id: 'fyi_broadcast',
+  intent: 'FYI_BROADCAST',
+  label: 'הפצת מידע - FYI',
+  instructions: `הפצת מידע (FYI) — זה תהליך נפרד לגמרי מ"קול קורא".
+מותר רק למספרים מורשים. ההרשאה נבדקת בכלים, לא על ידך.
+
+שלב 1 — מבקש/ת לשלוח הפצת מידע ועדיין לא שלח/ה פורמט:
+קראי ל-getFyiFormat.
+• אם הוא מחזיר הצלחה — שלחי את הטקסט שחוזר **בדיוק כפי שהוא**, מילה במילה.
+• אם הוא מחזיר שאין הרשאה — הסבירי בנימוס שהפצת מידע פתוחה לסגל בלבד, והציעי עזרה אחרת.
+  אל תשלחי את הפורמט במקרה כזה.
+
+שלב 2 — התקבל פורמט מלא:
+קראי ל-broadcastFyi:
+• filledForm — הטקסט המלא בדיוק כפי שנשלח.
+• editedFields — הגרסה הערוכה שלך לכל שדה.
+
+העריכה שלך: תיקון ניסוח, כתיב, פיסוק וסדר — כדי שההודעה תהיה ברורה ומקצועית.
+**אסור** להוסיף מידע, להסיר מידע, לשנות מספרים/תאריכים/שמות או לפרש מחדש.
+אם משהו לא ברור — עדיף להשאיר כפי שנכתב.
+
+אם הכלי מחזיר שחסרים שדות — בקשי רק את מה שחסר ונסי שוב.
+רק אחרי הצלחה אמרי שההודעה הופצה, וציני לאילו קבוצות.`,
+  tools: ['getFyiFormat', 'broadcastFyi', 'escalateToStaff'],
+};
+
 const seniorStaff: WorkflowDefinition = {
   id: 'senior_staff',
   intent: 'SENIOR_STAFF',
@@ -140,6 +167,7 @@ export const WORKFLOWS: WorkflowDefinition[] = [
   developmentTracks,
   generalQuestion,
   seniorStaff,
+  fyiBroadcast,
   other,
 ];
 
@@ -151,7 +179,22 @@ export function workflowForIntent(intent: ChatbotIntent): WorkflowDefinition | n
   return WORKFLOWS.find(w => w.intent === intent) ?? null;
 }
 
+/**
+ * Cross-cutting tools available in every workflow.
+ *
+ * Identifying details can be volunteered at any point in any conversation, so
+ * saveContactDetails must never depend on which workflow happens to be active —
+ * otherwise the bot thanks her for the details and silently fails to store them.
+ */
+export const ALWAYS_AVAILABLE_TOOLS = ['saveContactDetails'];
+
+/** Tools a workflow may use, including the cross-cutting ones. */
+export function toolsForWorkflow(workflow: WorkflowDefinition | null): string[] {
+  const base = workflow ? workflow.tools : WORKFLOWS.flatMap(w => w.tools);
+  return Array.from(new Set([...base, ...ALWAYS_AVAILABLE_TOOLS]));
+}
+
 /** Every tool any workflow can reach — used when no workflow is active yet. */
 export function allWorkflowTools(): string[] {
-  return Array.from(new Set(WORKFLOWS.flatMap(w => w.tools)));
+  return toolsForWorkflow(null);
 }

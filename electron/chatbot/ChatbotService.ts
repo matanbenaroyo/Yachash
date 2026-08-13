@@ -21,7 +21,7 @@ import { ConversationManager } from './ConversationManager';
 import { detectIntent } from './intentRouter';
 import { buildSystemPrompt } from './prompts/system';
 import { TOOL_MAP, toolDefinitionsFor } from './tools';
-import { WORKFLOW_BY_ID, allWorkflowTools, workflowForIntent } from './workflows';
+import { WORKFLOW_BY_ID, toolsForWorkflow, workflowForIntent } from './workflows';
 import { extractHebrewMonth, parseHebrewDate, parseHebrewTime } from './dateParser';
 
 /** Guard against a tool-call loop burning tokens on a single message. */
@@ -219,8 +219,7 @@ export class ChatbotService {
       now,
     };
 
-    const toolNames = workflow ? workflow.tools : allWorkflowTools();
-    const tools = toolDefinitionsFor(toolNames);
+    const tools = toolDefinitionsFor(toolsForWorkflow(workflow));
 
     const messages: any[] = recentTurns.map(t => ({ role: t.role, content: t.content }));
     if (!messages.length || messages[0].role !== 'user') {
@@ -233,6 +232,7 @@ export class ChatbotService {
         workflow,
         todayISO: now.toISOString().slice(0, 10),
         extraContext,
+        knownContact: this.lookupKnownContact(phoneNumber),
       });
 
       const response = await client.messages.create({
@@ -362,6 +362,19 @@ export class ChatbotService {
 
   private reload(id: string): ConversationState {
     return this.conversations.get(id)!;
+  }
+
+  /** Details this phone gave previously, so the bot never re-asks. */
+  private lookupKnownContact(phoneNumber: string) {
+    try {
+      return (
+        this.db
+          .prepare(`SELECT full_name, personal_number, rank FROM chatbot_known_contacts WHERE phone_number = ?`)
+          .get(phoneNumber) ?? null
+      );
+    } catch {
+      return null;
+    }
   }
 
   private async sendWhatsApp(accountId: string, to: string, message: string): Promise<void> {

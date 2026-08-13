@@ -372,6 +372,9 @@ export interface ChatbotConfig {
   historyTurns: number;
   greeting: string;
   seniorStaffRouting: Array<{ option: number; label: string; name: string; phone: string }>;
+  fyiSenders: Array<{ phone: string; name: string; role: string }>;
+  fyiGroups: Array<{ chatId: string; label: string }>;
+  fyiDigestTime: string;
 }
 
 export interface ChatbotStatus {
@@ -625,6 +628,9 @@ export interface ElectronAPI {
       bulkImport: (category: string, text: string) => Promise<{ created: number; titles: string[] }>;
       deleteDemo: () => Promise<{ deleted: number }>;
     };
+    getFyiMessages: () => Promise<any[]>;
+    sendDigestNow: () => Promise<{ ok: boolean; count: number; delivered: string[]; error?: string }>;
+    getKnownContacts: () => Promise<any[]>;
     simulate: (phoneNumber: string, message: string) => Promise<{ handled: boolean; reply?: string; intent?: string; error?: string }>;
     resetConversation: (phoneNumber: string) => Promise<void>;
   };

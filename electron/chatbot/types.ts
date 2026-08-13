@@ -15,6 +15,7 @@ export type ChatbotIntent =
   | 'DEVELOPMENT_TRACKS'
   | 'GENERAL_QUESTION'
   | 'SENIOR_STAFF'
+  | 'FYI_BROADCAST'
   | 'OTHER'
   | 'UNKNOWN';
 
@@ -26,6 +27,7 @@ export const CHATBOT_INTENTS: ChatbotIntent[] = [
   'DEVELOPMENT_TRACKS',
   'GENERAL_QUESTION',
   'SENIOR_STAFF',
+  'FYI_BROADCAST',
   'OTHER',
   'UNKNOWN',
 ];
@@ -144,6 +146,12 @@ export interface ChatbotConfig {
   greeting: string;
   /** Rank -> staff member routing for senior-staff escalations. */
   seniorStaffRouting: Array<{ option: number; label: string; name: string; phone: string }>;
+  /** Only these numbers may submit an FYI broadcast. */
+  fyiSenders: Array<{ phone: string; name: string; role: string }>;
+  /** WhatsApp groups an approved FYI is broadcast to. */
+  fyiGroups: Array<{ chatId: string; label: string }>;
+  /** Daily digest time, 24h "HH:MM". Empty disables the digest. */
+  fyiDigestTime: string;
 }
 
 export interface KnowledgeSearchParams {

@@ -15,6 +15,7 @@ import { ChatbotService } from './chatbot/ChatbotService';
 import { KnowledgeService } from './chatbot/knowledge/KnowledgeService';
 import { getChatbotConfig, saveChatbotConfig } from './chatbot/config';
 import { WORKFLOWS } from './chatbot/workflows';
+import { FyiDigestScheduler } from './chatbot/FyiDigestScheduler';
 import { logger } from './logger';
 import * as XLSX from 'xlsx';
 import fs from 'fs';
@@ -31,6 +32,7 @@ let groupCampaignScheduler: GroupCampaignScheduler;
 let duoplusManager: DuoPlusManager;
 let chatbotService: ChatbotService;
 let knowledgeService: KnowledgeService;
+let fyiDigestScheduler: FyiDigestScheduler;
 
 // Helper function to normalize phone numbers for matching
 function normalizePhoneForMatching(phone: string): string[] {
@@ -165,6 +167,7 @@ async function initializeServices() {
   chatbotService.setWhatsAppManager(whatsappManager);
   whatsappManager.setChatbotService(chatbotService);
   console.log('🤖 ChatbotService wired', chatbotService.getConfig().enabled ? '(enabled)' : '(disabled)');
+  fyiDigestScheduler.start();
 
   // Wire campaign scheduler so accounts trigger campaign resume on ready
   whatsappManager.setCampaignScheduler(campaignScheduler);
@@ -194,6 +197,21 @@ export function setupIPCHandlers() {
   // services must pick up the new one rather than keep using a dead handle.
   chatbotService = new ChatbotService(getDatabase);
   knowledgeService = new KnowledgeService(getDatabase);
+
+  // Daily FYI digest. Resolves the WhatsApp manager and account lazily, because
+  // neither exists until a license validates and an account connects.
+  fyiDigestScheduler = new FyiDigestScheduler(
+    getDatabase,
+    () => whatsappManager,
+    () => {
+      const config = getChatbotConfig(getDatabase());
+      if (config.accountIds.length) return config.accountIds[0];
+      const row = getDatabase()
+        .prepare(`SELECT id FROM accounts WHERE status = 'connected' ORDER BY created_at ASC LIMIT 1`)
+        .get() as { id?: string } | undefined;
+      return row?.id ?? null;
+    },
+  );
 
   // Initialize only license manager (lightweight)
   licenseManager = new LicenseManager();
@@ -2972,6 +2990,23 @@ export function setupIPCHandlers() {
     if (!chatbotService) return { handled: false, error: 'Chatbot service not initialized' };
     return chatbotService.simulate(phoneNumber || 'test-console', message);
   });
+
+  // ---- FYI broadcasts ----
+  ipcMain.handle('chatbot:getFyiMessages', () => withDbRecovery(() =>
+    getDatabase().prepare(`SELECT * FROM chatbot_fyi_messages ORDER BY created_at DESC LIMIT 200`).all(),
+  ));
+
+  ipcMain.handle('chatbot:sendDigestNow', async () => {
+    if (!fyiDigestScheduler) return { ok: false, count: 0, delivered: [], error: 'Scheduler not initialized' };
+    return fyiDigestScheduler.sendNow();
+  });
+
+  // ---- Contacts who wrote to the bot ----
+  ipcMain.handle('chatbot:getKnownContacts', () => withDbRecovery(() =>
+    getDatabase()
+      .prepare(`SELECT * FROM chatbot_known_contacts ORDER BY updated_at DESC LIMIT 500`)
+      .all(),
+  ));
 
   ipcMain.handle('chatbot:resetConversation', (_event, phoneNumber: string) => {
     db.prepare(`UPDATE chatbot_conversations SET status = 'completed' WHERE phone_number = ? AND status = 'active'`)

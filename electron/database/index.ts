@@ -794,6 +794,39 @@ export async function initDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- "פורמט הפצת מידע - FYI" broadcasts, kept both as an audit log and as the
+    -- source for the daily 16:00 digest.
+    CREATE TABLE IF NOT EXISTS chatbot_fyi_messages (
+      id TEXT PRIMARY KEY,
+      sender_phone TEXT NOT NULL,
+      sender_name TEXT,
+      sender_role TEXT,
+      subject TEXT,
+      audience TEXT,
+      highlights TEXT,
+      tagav TEXT,
+      raw_text TEXT,
+      broadcast_text TEXT,
+      status TEXT DEFAULT 'pending',
+      delivered_to TEXT DEFAULT '[]',
+      error TEXT,
+      digest_sent_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- People who contacted the bot. Collected once, then reused so the bot
+    -- never re-asks someone who already identified themselves.
+    CREATE TABLE IF NOT EXISTS chatbot_known_contacts (
+      phone_number TEXT PRIMARY KEY,
+      full_name TEXT,
+      personal_number TEXT,
+      rank TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chatbot_fyi_created ON chatbot_fyi_messages(created_at);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_fyi_digest ON chatbot_fyi_messages(digest_sent_at);
     CREATE INDEX IF NOT EXISTS idx_chatbot_conv_phone ON chatbot_conversations(phone_number, account_id);
     CREATE INDEX IF NOT EXISTS idx_chatbot_conv_status ON chatbot_conversations(status);
     CREATE INDEX IF NOT EXISTS idx_chatbot_messages_conv ON chatbot_messages(conversation_id);
