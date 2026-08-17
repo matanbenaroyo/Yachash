@@ -32,6 +32,8 @@ export interface HandleResult {
   reply?: string;
   intent?: ChatbotIntent;
   error?: string;
+  /** Simulation only: messages the tools would have sent, suppressed instead. */
+  wouldHaveSent?: Array<{ to: string; message: string }>;
 }
 
 export class ChatbotService {
@@ -163,6 +165,7 @@ export class ChatbotService {
           : undefined;
 
       // 4. Let the model converse, with only this workflow's tools available.
+      const outbound: Array<{ to: string; message: string }> = [];
       const reply = await this.runConversation({
         client,
         config,
@@ -172,6 +175,8 @@ export class ChatbotService {
         accountId,
         phoneNumber,
         now,
+        deliver,
+        outbound,
         extraContext: [extra, greeting].filter(Boolean).join('\n\n') || undefined,
       });
 
@@ -180,7 +185,12 @@ export class ChatbotService {
 
       if (deliver) await this.sendWhatsApp(accountId, phoneNumber, finalReply);
 
-      return { handled: true, reply: finalReply, intent: workflow?.intent ?? decision.intent };
+      return {
+        handled: true,
+        reply: finalReply,
+        intent: workflow?.intent ?? decision.intent,
+        ...(deliver ? {} : { wouldHaveSent: outbound }),
+      };
     } catch (e: any) {
       const message = String(e?.message ?? e);
       console.error('🤖 Chatbot error:', message);
@@ -204,9 +214,13 @@ export class ChatbotService {
     accountId: string;
     phoneNumber: string;
     now: Date;
+    /** False in simulation: tools must not reach anyone for real. */
+    deliver: boolean;
+    /** Collects what simulation would have sent, for display in the test tab. */
+    outbound: Array<{ to: string; message: string }>;
     extraContext?: string;
   }): Promise<string> {
-    const { client, config, workflow, recentTurns, accountId, phoneNumber, now, extraContext } = params;
+    const { client, config, workflow, recentTurns, accountId, phoneNumber, now, deliver, outbound, extraContext } = params;
     let conversation = params.conversation;
 
     const ctx: WorkflowContext = {
@@ -215,7 +229,18 @@ export class ChatbotService {
       conversation,
       config,
       db: this.db,
-      sendWhatsApp: (to, message) => this.sendWhatsApp(accountId, to, message),
+      // Simulation suppresses the reply but tools have their own side effects:
+      // an escalation would message a real רמ״דית, and a queued FYI would still
+      // be recorded. Testing "אני רס״ל, יש לי שאלה" must not page anyone, so
+      // the send is captured rather than performed.
+      sendWhatsApp: async (to, message) => {
+        if (!deliver) {
+          outbound.push({ to, message });
+          console.log(`🧪 [simulation] suppressed send to ${to}`);
+          return;
+        }
+        await this.sendWhatsApp(accountId, to, message);
+      },
       now,
     };
 
