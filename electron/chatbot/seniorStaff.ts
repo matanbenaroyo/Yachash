@@ -11,6 +11,8 @@
  * are only the initial defaults.
  */
 
+import { classifyRank, mentionsGenericNco, routeForCategory } from './ranks';
+
 export interface SeniorStaffRoute {
   /** The number the user picks, 1-based. */
   option: number;
@@ -80,25 +82,74 @@ export function buildRankMenu(routes: SeniorStaffRoute[]): string {
  * asks again instead of guessing a destination.
  */
 export function resolveRoute(answer: unknown, routes: SeniorStaffRoute[]): SeniorStaffRoute | null {
-  if (answer === null || answer === undefined) return null;
+  return resolveRankRouting(answer, routes).route;
+}
+
+/**
+ * What a rank answer resolves to.
+ *
+ * `belowMenu` is distinct from "no match": the rank was understood and is
+ * simply below everything the menu covers, which is a routable outcome (the
+ * configured fallback) rather than a reason to re-ask.
+ */
+export interface RankRouting {
+  route: SeniorStaffRoute | null;
+  belowMenu: boolean;
+  /** The rank that was recognised, for the message sent onward. */
+  rank: string | null;
+  /** True when she said "נגד/ת" without saying which — ask for the exact rank. */
+  needsExactNcoRank: boolean;
+}
+
+/**
+ * Resolves the user's answer to a route.
+ *
+ * Accepts a menu number ("3", "3.", "אני 3"), the category label, or — most
+ * commonly in practice — the rank itself ("סמ״ר", "אני רס״ל"). Rank answers
+ * used to fall through entirely, which is how someone answering "סמר" ended up
+ * in an unrelated workflow.
+ */
+export function resolveRankRouting(answer: unknown, routes: SeniorStaffRoute[]): RankRouting {
+  const empty: RankRouting = { route: null, belowMenu: false, rank: null, needsExactNcoRank: false };
+  if (answer === null || answer === undefined) return empty;
 
   const text = String(answer).trim();
-  if (!text) return null;
+  if (!text) return empty;
+
+  // A stated rank wins over a bare digit: "רס״ל" contains no digit, but an
+  // answer like "אני 4 - רס״ל" should agree either way, and the rank is the
+  // more specific signal.
+  const rank = classifyRank(text);
+  if (rank) {
+    if (rank.category === 'below_menu') {
+      return { route: null, belowMenu: true, rank: rank.canonical, needsExactNcoRank: false };
+    }
+    const routed = routeForCategory(rank.category, routes);
+    if (routed) return { route: routed, belowMenu: false, rank: rank.canonical, needsExactNcoRank: false };
+  }
+
+  // "נגד/ת" alone does not say whether she is בקבע ראשוני or מובהק, and those
+  // go to different people — ask instead of picking one.
+  if (mentionsGenericNco(text) && !rank) {
+    return { route: null, belowMenu: false, rank: null, needsExactNcoRank: true };
+  }
 
   // A standalone number anywhere in the reply.
   const match = text.match(/(?:^|\s|[.)\-])([1-9])(?:[.)\s]|$)/) ?? text.match(/^([1-9])$/);
   if (match) {
     const picked = Number(match[1]);
-    return routes.find(r => r.option === picked) ?? null;
+    const byOption = routes.find(r => r.option === picked) ?? null;
+    if (byOption) return { route: byOption, belowMenu: false, rank: rank?.canonical ?? null, needsExactNcoRank: false };
   }
 
   // Fall back to matching the label text if she typed the category instead.
   const normalized = normalize(text);
-  return (
+  const byLabel =
     routes.find(r => normalize(r.label) === normalized) ??
     routes.find(r => normalized.length >= 4 && normalize(r.label).includes(normalized)) ??
-    null
-  );
+    null;
+
+  return { route: byLabel, belowMenu: false, rank: rank?.canonical ?? null, needsExactNcoRank: false };
 }
 
 function normalize(s: string): string {

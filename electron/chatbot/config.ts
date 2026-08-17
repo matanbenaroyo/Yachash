@@ -17,7 +17,11 @@ export const DEFAULT_GREETING = `שלום 👋
 const DEFAULTS: ChatbotConfig = {
   enabled: false,
   apiKey: '',
-  model: 'claude-opus-5',
+  // Sonnet, not Opus: this is a high-volume WhatsApp responder where every
+  // incoming message costs a call, and the work — intent detection, form
+  // parsing and short Hebrew replies over tool results — does not need the
+  // larger model. Changeable per-install from the Chatbot settings page.
+  model: 'claude-sonnet-5',
   accountIds: [],
   vehicleEntryStaffPhone: '',
   generalStaffPhone: '',

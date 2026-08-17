@@ -14,12 +14,13 @@ import {
   parseVehicleEntryForm,
   renderVehicleEntryForm,
 } from '../workflows/vehicleEntryFormat';
-import { buildRankMenu, resolveRoute } from '../seniorStaff';
+import { buildRankMenu, resolveRankRouting } from '../seniorStaff';
+import { toLocalIsraeliPhone } from '../phone';
 import {
   FYI_FORMAT,
   findSender,
   parseFyiForm,
-  renderFyiBroadcast,
+  renderDigestEntry,
 } from '../fyi';
 
 function knowledge(ctx: WorkflowContext) {
@@ -263,10 +264,12 @@ const getFyiFormat: ChatbotTool = {
 const broadcastFyi: ChatbotTool = {
   name: 'broadcastFyi',
   description:
-    'Broadcasts a filled FYI form to the unit WhatsApp groups. Pass the sender\'s message verbatim as ' +
-    'filledForm, and your lightly edited version of each field in editedFields (fix wording, spelling and ' +
-    'formatting only — never add, remove or reinterpret information). Authorization and completeness are ' +
-    'enforced here: an unauthorized sender or a form missing mandatory fields is rejected and nothing is sent.',
+    'Queues a filled FYI form for the next daily digest to the unit WhatsApp groups. It is NOT sent ' +
+    'immediately — everything received is accumulated and delivered as one consolidated message once ' +
+    'every 24 hours. Pass the sender\'s message verbatim as filledForm, and your lightly edited version ' +
+    'of each field in editedFields (fix wording, spelling and formatting only — never add, remove or ' +
+    'reinterpret information). Authorization and completeness are enforced here: an unauthorized sender ' +
+    'or a form missing mandatory fields is rejected and nothing is queued.',
   input_schema: {
     type: 'object',
     properties: {
@@ -309,54 +312,45 @@ const broadcastFyi: ChatbotTool = {
       if (typeof v === 'string' && v.trim() && parsed.values[k] !== undefined) edited[k] = v.trim();
     }
 
-    const body = renderFyiBroadcast(edited, sender);
     const groups = ctx.config.fyiGroups.filter(g => g.chatId);
-    if (!groups.length) return { ok: false, error: 'לא הוגדרו קבוצות להפצה. ההודעה לא נשלחה.' };
+    if (!groups.length) return { ok: false, error: 'לא הוגדרו קבוצות להפצה. ההודעה לא נקלטה.' };
 
+    // 4. Queue it. Nothing goes to the groups here.
+    //
+    // FYI messages are accumulated and delivered as ONE consolidated digest per
+    // 24 hours (FyiDigestScheduler), so the groups get a single message a day
+    // rather than one per submission. The stored text is the digest entry —
+    // which drops the "הפצת מידע - FYI" form title and carries the contact and
+    // their number instead.
+    const entry = renderDigestEntry(edited, sender);
     const id = randomUUID();
     ctx.db
       .prepare(
         `INSERT INTO chatbot_fyi_messages
            (id, sender_phone, sender_name, sender_role, subject, audience, highlights, tagav, raw_text, broadcast_text, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')`,
       )
       .run(
         id, sender.phone, sender.name, sender.role,
         edited['נושא ההודעה'] ?? '', edited['אוכלוסיה'] ?? '',
         edited['דגשים'] ?? '', edited['תג״ב'] ?? '',
-        String(input.filledForm ?? ''), body,
+        String(input.filledForm ?? ''), entry,
       );
 
-    // 4. Deliver. Partial success is reported honestly rather than as success.
-    const delivered: string[] = [];
-    const failed: string[] = [];
-    for (const g of groups) {
-      try {
-        await ctx.sendWhatsApp(g.chatId, body);
-        delivered.push(g.label || g.chatId);
-      } catch (e: any) {
-        failed.push(`${g.label || g.chatId} (${e?.message ?? e})`);
-      }
-    }
+    const pending = ctx.db
+      .prepare(`SELECT COUNT(*) n FROM chatbot_fyi_messages WHERE status = 'queued' AND digest_sent_at IS NULL`)
+      .get() as { n: number };
 
-    ctx.db
-      .prepare(`UPDATE chatbot_fyi_messages SET status = ?, delivered_to = ?, error = ? WHERE id = ?`)
-      .run(
-        failed.length === 0 ? 'sent' : delivered.length ? 'partial' : 'failed',
-        JSON.stringify(delivered),
-        failed.length ? failed.join('; ') : null,
-        id,
-      );
-
-    if (!delivered.length) {
-      return { ok: false, error: `ההפצה נכשלה לכל הקבוצות: ${failed.join('; ')}` };
-    }
     return {
       ok: true,
       data: {
-        deliveredTo: delivered,
-        failedGroups: failed,
-        note: failed.length ? 'חלק מהקבוצות נכשלו — ציין זאת למשתמשת' : undefined,
+        queued: true,
+        digestTime: ctx.config.fyiDigestTime || '16:00',
+        groups: groups.map(g => g.label || g.chatId),
+        pendingCount: pending?.n ?? 1,
+        note:
+          'ההודעה נקלטה ותופץ בריכוז היומי — לא נשלחה עכשיו. אמרי לה את זה במפורש, ' +
+          'וציני לאיזו שעה ולאילו קבוצות.',
       },
     };
   },
@@ -375,17 +369,86 @@ const getSeniorStaffOptions: ChatbotTool = {
   }),
 };
 
+/** A resolved escalation destination, or the reason one could not be resolved. */
+type RankDestination =
+  | { ok: true; phone: string; name: string; category: string; rank: string | null }
+  | { ok: false; result: ToolResult };
+
+/**
+ * Resolves who an escalation should go to, from whatever the user said about
+ * her rank.
+ *
+ * Every path that forwards a person's question runs through here, so "check the
+ * rank before forwarding" is enforced in code rather than trusted to the model.
+ * Without it, every unanswerable question went to the single general staff
+ * number — which is why one person was receiving nearly all of them.
+ */
+function resolveRankDestination(rankAnswer: unknown, ctx: WorkflowContext): RankDestination {
+  const routes = ctx.config.seniorStaffRouting;
+  const routing = resolveRankRouting(rankAnswer, routes);
+
+  if (routing.needsExactNcoRank) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        error:
+          'לא צוינה הדרגה המדויקת. שאלי מה הדרגה בדיוק (סמ״ר / רס״ל / רס״ר / רס״מ / רס״ב / רנ״ג) ואז נסי שוב.',
+      },
+    };
+  }
+
+  // A rank below everything the menu covers still has a destination — the
+  // general staff contact — so this is a routable answer, not a failed one.
+  if (routing.belowMenu) {
+    const fallback = resolveStaffPhone(ctx.config, 'general');
+    if (!fallback) {
+      return { ok: false, result: { ok: false, error: 'לא הוגדר מספר סגל לפניות מדרגות זוטרות. יש להשלים בהגדרות.' } };
+    }
+    return {
+      ok: true,
+      phone: fallback,
+      name: 'סגל היח״ש',
+      category: `דרגה מתחת לקטגוריות התפריט${routing.rank ? ` (${routing.rank})` : ''}`,
+      rank: routing.rank,
+    };
+  }
+
+  if (routing.route) {
+    if (!routing.route.phone) {
+      return { ok: false, result: { ok: false, error: `לא מוגדר מספר טלפון עבור "${routing.route.label}". יש להשלים בהגדרות.` } };
+    }
+    return {
+      ok: true,
+      phone: routing.route.phone,
+      name: routing.route.name,
+      category: routing.route.label,
+      rank: routing.rank,
+    };
+  }
+
+  return {
+    ok: false,
+    result: {
+      ok: false,
+      error: 'צריך לדעת את הדרגה לפני העברת הפנייה. שלחי את התפריט ובקשי לבחור מספר או לציין דרגה.',
+      data: { menu: buildRankMenu(routes) },
+    },
+  };
+}
+
 const escalateToSeniorStaff: ChatbotTool = {
   name: 'escalateToSeniorStaff',
   description:
     'Routes a question to the senior staff member responsible for the user\'s rank, over WhatsApp. ' +
-    'Pass rankAnswer exactly as the user replied to the rank menu (usually a digit 1-5). ' +
-    'If the answer does not match an option this returns ok:false — re-send the menu instead of guessing. ' +
+    'Pass rankAnswer exactly as the user replied — a menu digit (1-5), a category, or the rank itself ' +
+    '("סמ״ר", "רס״ל", "רס״ר"). Ranks are resolved here, so never map a rank to a number yourself. ' +
+    'If the answer cannot be resolved this returns ok:false — re-send the menu instead of guessing. ' +
     'Include the question and, if known, her name.',
   input_schema: {
     type: 'object',
     properties: {
-      rankAnswer: { type: 'string', description: "The user's reply to the rank menu, verbatim" },
+      rankAnswer: { type: 'string', description: "The user's rank or menu reply, verbatim" },
       question: { type: 'string', description: "The user's question or request, in Hebrew" },
       fullName: { type: 'string', description: 'Her name if she gave it' },
       summary: { type: 'string', description: 'Short Hebrew summary of the conversation' },
@@ -393,25 +456,15 @@ const escalateToSeniorStaff: ChatbotTool = {
     required: ['rankAnswer', 'question'],
   },
   execute: async (input, ctx) => {
-    const routes = ctx.config.seniorStaffRouting;
-    const route = resolveRoute(input.rankAnswer, routes);
-
-    if (!route) {
-      return {
-        ok: false,
-        error: 'התשובה לא תואמת אף אפשרות. שלח שוב את התפריט ובקש לבחור מספר בין 1 ל-' + routes.length + '.',
-        data: { menu: buildRankMenu(routes) },
-      };
-    }
-    if (!route.phone) {
-      return { ok: false, error: `לא מוגדר מספר טלפון עבור "${route.label}". יש להשלים בהגדרות.` };
-    }
+    const dest = resolveRankDestination(input.rankAnswer, ctx);
+    if (!dest.ok) return dest.result;
 
     const body =
       `פנייה חדשה מהבוט 🤖\n` +
-      `קטגוריה: ${route.label}\n` +
+      `קטגוריה: ${dest.category}\n` +
+      (dest.rank ? `דרגה: ${dest.rank}\n` : '') +
       `שם: ${input.fullName || 'לא נמסר'}\n` +
-      `טלפון: ${ctx.phoneNumber}\n\n` +
+      `טלפון: ${toLocalIsraeliPhone(ctx.phoneNumber)}\n\n` +
       `השאלה:\n${input.question}` +
       (input.summary ? `\n\nסיכום השיחה:\n${input.summary}` : '');
 
@@ -426,15 +479,15 @@ const escalateToSeniorStaff: ChatbotTool = {
         ctx.conversation.id,
         ctx.phoneNumber,
         String(input.question ?? ''),
-        `[${route.label}] → ${route.name}\n${input.summary ?? ''}`.trim(),
-        route.phone,
+        `[${dest.category}] → ${dest.name}\n${input.summary ?? ''}`.trim(),
+        dest.phone,
       );
 
     try {
-      await ctx.sendWhatsApp(route.phone, body);
+      await ctx.sendWhatsApp(dest.phone, body);
       ctx.db.prepare(`UPDATE chatbot_escalations SET status = 'sent' WHERE id = ?`).run(id);
       ctx.db.prepare(`UPDATE chatbot_conversations SET status = 'escalated' WHERE id = ?`).run(ctx.conversation.id);
-      return { ok: true, data: { routedTo: route.name, category: route.label } };
+      return { ok: true, data: { routedTo: dest.name, category: dest.category, rank: dest.rank ?? undefined } };
     } catch (e: any) {
       ctx.db.prepare(`UPDATE chatbot_escalations SET status = 'failed', error = ? WHERE id = ?`).run(String(e?.message ?? e), id);
       return { ok: false, error: `העברת הפנייה נכשלה: ${e?.message ?? e}` };
@@ -445,23 +498,33 @@ const escalateToSeniorStaff: ChatbotTool = {
 const escalateToStaff: ChatbotTool = {
   name: 'escalateToStaff',
   description:
-    'Forward a question the knowledge base cannot answer to the מערך היח״ש staff WhatsApp number. ' +
-    'Call this INSTEAD of guessing whenever you lack a reliable answer.',
+    'Forward a question the knowledge base cannot answer to the right staff member. ' +
+    'Call this INSTEAD of guessing whenever you lack a reliable answer. ' +
+    'You MUST pass rank — the destination depends on it. If you do not know it yet, ask her first ' +
+    '("מה הדרגה שלך?"); this returns ok:false with the menu when the rank is missing or unclear.',
   input_schema: {
     type: 'object',
     properties: {
       question: { type: 'string', description: "The user's question, verbatim" },
+      rank: { type: 'string', description: 'Her rank or rank-menu answer, verbatim (e.g. "רס״ל", "4")' },
       summary: { type: 'string', description: 'Short Hebrew summary of the conversation so far' },
     },
-    required: ['question'],
+    required: ['question', 'rank'],
   },
   execute: async (input, ctx) => {
-    const to = resolveStaffPhone(ctx.config, 'general');
+    // Routing by rank happens here for the same reason as in
+    // escalateToSeniorStaff: this used to send every unanswerable question to
+    // one general number regardless of who was asking.
+    const dest = resolveRankDestination(input.rank, ctx);
+    if (!dest.ok) return dest.result;
+
     const senderName = (ctx.conversation.collectedData?.fullName as string) || 'לא ידוע';
     const body =
       `שאלה חדשה מהבוט 🤖\n` +
+      `קטגוריה: ${dest.category}\n` +
+      (dest.rank ? `דרגה: ${dest.rank}\n` : '') +
       `שם: ${senderName}\n` +
-      `טלפון: ${ctx.phoneNumber}\n\n` +
+      `טלפון: ${toLocalIsraeliPhone(ctx.phoneNumber)}\n\n` +
       `שאלה:\n${input.question}\n\n` +
       `סיכום השיחה:\n${input.summary || '—'}`;
 
@@ -469,20 +532,22 @@ const escalateToStaff: ChatbotTool = {
     ctx.db
       .prepare(
         `INSERT INTO chatbot_escalations (id, conversation_id, phone_number, question, summary, staff_phone, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
       )
-      .run(id, ctx.conversation.id, ctx.phoneNumber, String(input.question ?? ''), String(input.summary ?? ''), to, to ? 'pending' : 'unconfigured');
-
-    if (!to) {
-      // Recorded for staff review even though delivery is impossible.
-      return { ok: false, error: 'לא הוגדר מספר סגל להעברת שאלות. הפנייה נשמרה במערכת.' };
-    }
+      .run(
+        id,
+        ctx.conversation.id,
+        ctx.phoneNumber,
+        String(input.question ?? ''),
+        `[${dest.category}] → ${dest.name}\n${input.summary ?? ''}`.trim(),
+        dest.phone,
+      );
 
     try {
-      await ctx.sendWhatsApp(to, body);
+      await ctx.sendWhatsApp(dest.phone, body);
       ctx.db.prepare(`UPDATE chatbot_escalations SET status = 'sent' WHERE id = ?`).run(id);
       ctx.db.prepare(`UPDATE chatbot_conversations SET status = 'escalated' WHERE id = ?`).run(ctx.conversation.id);
-      return { ok: true, data: { deliveredTo: to } };
+      return { ok: true, data: { routedTo: dest.name, category: dest.category, rank: dest.rank ?? undefined } };
     } catch (e: any) {
       ctx.db.prepare(`UPDATE chatbot_escalations SET status = 'failed', error = ? WHERE id = ?`).run(String(e?.message ?? e), id);
       return { ok: false, error: `העברת השאלה לסגל נכשלה: ${e?.message ?? e}` };
@@ -511,7 +576,7 @@ const sendMessageToStaff: ChatbotTool = {
     const body =
       `פנייה חדשה מהבוט 🤖\n` +
       `סוג: ${kind === 'open_call' ? 'בקשה לפרסום קול קורא' : 'פנייה כללית'}\n` +
-      `טלפון: ${ctx.phoneNumber}\n` +
+      `טלפון: ${toLocalIsraeliPhone(ctx.phoneNumber)}\n` +
       (input.title ? `נושא: ${input.title}\n` : '') +
       `\nפרטים:\n${input.details}`;
 
@@ -563,7 +628,7 @@ export async function submitVehicleEntry(
   const body =
     `בקשת אישור כניסה 🚗\n` +
     `נשלח מהבוט של מערך היח״ש\n` +
-    `טלפון הפונה: ${ctx.phoneNumber}\n\n` +
+    `טלפון הפונה: ${toLocalIsraeliPhone(ctx.phoneNumber)}\n\n` +
     renderVehicleEntryForm(parsed.values);
 
   const id = randomUUID();

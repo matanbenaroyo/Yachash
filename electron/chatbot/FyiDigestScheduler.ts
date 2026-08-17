@@ -1,9 +1,14 @@
 /**
  * Daily FYI digest.
  *
- * Once a day at the configured time (default 16:00) every FYI broadcast from
- * the previous 24 hours is summarised and sent to the same groups, each entry
- * carrying the contact who submitted it and their phone number.
+ * This is the ONLY thing that posts FYI content to the groups. Submitting an
+ * FYI queues it (see broadcastFyi); once a day at the configured time (default
+ * 16:00) everything still queued goes out as one consolidated message, each
+ * entry carrying the contact who submitted it and their phone number, and
+ * dropping the "הפצת מידע - FYI" form title.
+ *
+ * Sending each submission immediately as well would mean the groups receive
+ * every message twice — once on arrival and again in the digest.
  *
  * Modelled on ScheduledCampaignChecker: a plain interval that checks whether
  * the target time has passed, so it survives restarts and does not depend on
@@ -81,14 +86,17 @@ export class FyiDigestScheduler {
     const db = this.db;
     const config = getChatbotConfig(db);
 
-    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+    // Everything queued since the last digest, rather than a fixed 24-hour
+    // window: if a digest fails or the machine was off at the target time,
+    // those messages must still go out with the next one instead of expiring
+    // unsent. `digest_sent_at` is what makes a message done.
     const rows = db
       .prepare(
         `SELECT * FROM chatbot_fyi_messages
-         WHERE created_at >= ? AND status IN ('sent','partial')
+         WHERE digest_sent_at IS NULL AND status = 'queued'
          ORDER BY created_at ASC`,
       )
-      .all(since) as any[];
+      .all() as any[];
 
     if (!rows.length) {
       // Nothing to report is a normal outcome, not a failure — stay silent in
@@ -110,7 +118,9 @@ export class FyiDigestScheduler {
       );
     });
 
-    const header = `סיכום הפצות מידע — ${formatHebrewDate(now)} 🗞️\n(${rows.length} הודעות ב-24 השעות האחרונות)`;
+    const header =
+      `סיכום הפצות מידע — ${formatHebrewDate(now)} 🗞️\n` +
+      `(${rows.length} ${rows.length === 1 ? 'הודעה' : 'הודעות'} מאז הסיכום הקודם)`;
     const body = [header, ...entries].join('\n\n———\n\n');
 
     const manager = this.getWhatsAppManager();
@@ -133,8 +143,13 @@ export class FyiDigestScheduler {
     }
 
     if (delivered.length) {
-      const mark = db.prepare(`UPDATE chatbot_fyi_messages SET digest_sent_at = CURRENT_TIMESTAMP WHERE id = ?`);
-      const markAll = db.transaction((ids: string[]) => { for (const id of ids) mark.run(id); });
+      const mark = db.prepare(
+        `UPDATE chatbot_fyi_messages
+         SET digest_sent_at = CURRENT_TIMESTAMP, status = 'sent', delivered_to = ?
+         WHERE id = ?`,
+      );
+      const deliveredJson = JSON.stringify(delivered);
+      const markAll = db.transaction((ids: string[]) => { for (const id of ids) mark.run(deliveredJson, id); });
       markAll(rows.map(r => r.id));
     }
 

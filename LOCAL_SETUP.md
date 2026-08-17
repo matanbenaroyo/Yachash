@@ -364,6 +364,46 @@ intent, required fields, allowed tools, instructions and completion action; add
 the intent to `ChatbotIntent` in `types.ts`, and a tool to `tools/index.ts` if it
 needs a new action. The engine, conversation state and IPC layer do not change.
 
+### Who a message gets forwarded to
+
+Every path that forwards a person's question resolves the destination from her
+**rank**, in `resolveRankDestination` (`electron/chatbot/tools/index.ts`) — not in a
+prompt. A tool called without a resolvable rank returns `ok:false` with the menu
+instead of sending, so "check the rank first" cannot be skipped by the model.
+
+Ranks are recognised from what she actually types — `סמ״ר`, `סמר`, `רס"ל`, `אני רס״ב`
+— by `electron/chatbot/ranks.ts`, which matches explicit aliases rather than stripping
+Hebrew letters (a generic normaliser collapses `רס״ל`/`רס״ר`/`רס״ב` onto each other, and
+misrouting is worse than not recognising).
+
+| What she says | Goes to |
+|---|---|
+| סמ״ר, רס״ל | option 4 — נגד/ת בקבע ראשוני |
+| רס״ר, רס״מ, רס״ב, רנ״ג | option 5 — נגד/ת מובהק |
+| סג״ם, סגן, סרן | option 2 |
+| רס״ן and above | option 3 |
+| סמל, רב״ט, טוראי | below the menu → the general staff contact |
+| "נגדת" with no specific rank | nothing is sent — she is asked which |
+
+Categories map to options by number, then by label text, so reordering the table in
+the UI does not silently misroute people.
+
+Phone numbers are stored internationally (WhatsApp requires it) but every number a
+human reads is rendered locally by `toLocalIsraeliPhone` — `972529217523` → `0529217523`.
+
+### FYI distribution is accumulated, never immediate
+
+Submitting an FYI **queues** it (`status='queued'`). Nothing reaches the groups at that
+moment. `FyiDigestScheduler` is the only thing that posts, once a day at
+`chatbot_fyi_digest_time` (default 16:00), as a single consolidated message.
+
+Each entry drops the `הפצת מידע - FYI` form title and leads with the contact and their
+number, per `renderDigestEntry`.
+
+The digest selects on `digest_sent_at IS NULL`, not on a 24-hour window: if a digest
+fails, or the machine was off at the target time, those messages go out with the next
+one instead of expiring unsent.
+
 ### Guarantees
 
 - The AI never invents organizational facts — dates, orders, schedules, tracks

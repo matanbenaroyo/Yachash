@@ -10,6 +10,8 @@
  * defaults only.
  */
 
+import { toLocalIsraeliPhone } from './phone';
+
 export interface FyiSender {
   /** Digits only, e.g. 972532840405. */
   phone: string;
@@ -158,7 +160,9 @@ export function renderFyiBroadcast(values: Record<string, string>, sender: FyiSe
  * their phone number, and omits the form's title line.
  */
 export function renderDigestEntry(values: Record<string, string>, sender: FyiSender): string {
-  const parts = [`איש קשר: ${sender.name}${sender.role ? ` — ${sender.role}` : ''} (${sender.phone})`];
+  const parts = [
+    `איש קשר: ${sender.name}${sender.role ? ` — ${sender.role}` : ''} (${toLocalIsraeliPhone(sender.phone)})`,
+  ];
   for (const f of FYI_FIELDS) {
     parts.push(`${f}: ${values[f] ?? '—'}`);
   }
