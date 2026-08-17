@@ -23,7 +23,14 @@ export function setupAutoUpdater() {
 
   // Configure auto-updater
   autoUpdater.autoDownload = false; // Don't download automatically - ask user first
-  autoUpdater.autoInstallOnAppQuit = true; // Install automatically when app quits
+
+  // Never swap the binary out from under a running bot.
+  //
+  // This is a private build for one machine and nothing is published to the
+  // fork's releases, so an automatic install could only ever replace a working
+  // app with something unexpected — while WhatsApp sessions are live. Updating
+  // stays a deliberate act: rebuild and reinstall.
+  autoUpdater.autoInstallOnAppQuit = false;
 
   // Log all auto-updater events
   autoUpdater.on('checking-for-update', () => {
@@ -68,13 +75,14 @@ export function setupAutoUpdater() {
     });
   });
 
-  // Check for updates when app starts (after a 3-second delay to let the app load)
-  setTimeout(() => {
-    console.log('🚀 Starting auto-update check...');
-    autoUpdater.checkForUpdates().catch(err => {
-      console.error('❌ Failed to check for updates:', err);
-    });
-  }, 3000);
+  // No automatic check on launch.
+  //
+  // The configured feed is this fork's own repo, which deliberately has no
+  // releases, so every launch used to 404 three seconds in and push an
+  // 'updater:error' into the renderer — a failure notice for a feature that is
+  // not in use. The manual checkForUpdates() below still works if a release is
+  // ever published on purpose.
+  console.log('🔒 Auto-update check on launch is disabled for this private build');
 }
 
 // Manually check for updates

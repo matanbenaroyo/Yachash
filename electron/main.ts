@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { app, BrowserWindow, Menu, protocol } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage, powerSaveBlocker, protocol } from 'electron';
 import { initDatabase, closeDatabase } from './database/index';
 import { setupIPCHandlers, campaignScheduler, warmUpService } from './ipc';
 import { logger } from './logger';
@@ -36,11 +36,9 @@ if (!hasSingleInstanceLock) {
   console.log('⚠️ LeadSender is already running - focusing the existing window');
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  });
+  // Double-clicking the desktop icon while the app is already running (possibly
+  // hidden in the tray) should bring the window back, not start a second copy.
+  app.on('second-instance', () => showMainWindow());
 }
 
 // Register custom protocol for serving local files (e.g. chat photos)
@@ -62,6 +60,84 @@ process.on('unhandledRejection', (reason) => {
 });
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+
+/**
+ * True only once the user has genuinely asked to exit (tray menu, or the OS
+ * shutting down). Closing the window sets nothing — it hides instead.
+ */
+let isQuitting = false;
+
+/** The "still running in the background" balloon is shown once per session. */
+let hasShownTrayHint = false;
+
+/**
+ * The app icon, or undefined to fall back to Electron's default.
+ *
+ * In production the icon lives inside the asar; asarUnpack only extracts
+ * better-sqlite3 and whatsapp-web.js, so dist/assets is never written to disk.
+ * fs works on asar paths, and the Vite content hash changes whenever the image
+ * does, so match by pattern rather than hardcoding a filename.
+ */
+function resolveIconPath(): string | undefined {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    return path.join(process.cwd(), 'src', 'images', 'lead-icon.png');
+  }
+  const assetsDir = path.join(__dirname, '..', 'dist', 'assets');
+  try {
+    const match = fs.readdirSync(assetsDir).find(n => /^lead-icon-.*\.png$/.test(n));
+    if (match) return path.join(assetsDir, match);
+  } catch {
+    // fall through to Electron's default icon
+  }
+  return undefined;
+}
+
+/** Brings the window back, recreating it if it was destroyed. */
+function showMainWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/**
+ * Tray icon, so closing the window leaves the bot running.
+ *
+ * Everything that answers WhatsApp — WhatsAppManager, the chatbot and the FYI
+ * digest scheduler — lives in the main process. Without this, clicking X quit
+ * the app and silently stopped answering messages, which is the opposite of
+ * what an always-on bot needs.
+ */
+function createTray() {
+  if (tray) return;
+
+  const iconPath = resolveIconPath();
+  try {
+    tray = iconPath ? new Tray(iconPath) : new Tray(nativeImage.createEmpty());
+  } catch (error) {
+    console.warn('⚠️ Could not create tray icon:', error);
+    return;
+  }
+
+  tray.setToolTip('LeadSender — הבוט פעיל');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'פתיחת LeadSender', click: () => showMainWindow() },
+    { type: 'separator' },
+    {
+      label: 'יציאה (הבוט יפסיק לענות)',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]));
+  tray.on('double-click', () => showMainWindow());
+  console.log('🔔 Tray icon ready - closing the window keeps the bot running');
+}
 
 function createWindow() {
   // In production, __dirname points to dist-electron
@@ -72,25 +148,8 @@ function createWindow() {
     ? path.join(process.cwd(), 'dist-electron', 'preload.js')
     : path.join(__dirname, 'preload.js');
     
-  // Production icon previously pointed at
-  //   process.resourcesPath/app.asar.unpacked/dist/assets/lead-icon-<hash>.png
-  // which never exists: asarUnpack only unpacks better-sqlite3 and whatsapp-web.js,
-  // so dist/assets is never written outside the asar. It also hardcoded a Vite
-  // content hash that changes whenever the image does. Resolve inside the asar
-  // (fs works on asar paths) and match the hash by pattern instead.
-  const iconPath = isDev
-    ? path.join(process.cwd(), 'src', 'images', 'lead-icon.png')
-    : (() => {
-        const assetsDir = path.join(__dirname, '..', 'dist', 'assets');
-        try {
-          const match = fs.readdirSync(assetsDir).find(n => /^lead-icon-.*\.png$/.test(n));
-          if (match) return path.join(assetsDir, match);
-        } catch {
-          // fall through to Electron's default icon
-        }
-        return undefined;
-      })();
-  
+  const iconPath = resolveIconPath();
+
   console.log('Is Dev:', isDev);
   console.log('__dirname:', __dirname);
   console.log('process.cwd():', process.cwd());
@@ -124,6 +183,22 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
     // DO NOT open DevTools in production
   }
+
+  // Closing the window hides it; the bot keeps answering in the background and
+  // the tray icon is how you get back. Only the tray's Quit (or the OS shutting
+  // us down) actually exits.
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    mainWindow?.hide();
+    if (!hasShownTrayHint) {
+      hasShownTrayHint = true;
+      tray?.displayBalloon?.({
+        title: 'LeadSender ממשיך לרוץ',
+        content: 'הבוט ממשיך לענות להודעות ברקע. לפתיחה — לחיצה כפולה על הסמל בשורת המשימות.',
+      });
+    }
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -248,7 +323,17 @@ app.whenReady().then(async () => {
   setupIPCHandlers();
 
   createWindow();
-  
+  createTray();
+
+  // Keep answering WhatsApp when the machine would otherwise idle down. The
+  // current power plan happens to have sleep disabled, but that is a setting
+  // anyone can change — the bot should not depend on it silently.
+  try {
+    powerSaveBlocker.start('prevent-app-suspension');
+  } catch (error) {
+    console.warn('⚠️ Could not block app suspension:', error);
+  }
+
   // Setup auto-updater (after window is created)
   setupAutoUpdater();
 
@@ -259,14 +344,16 @@ app.whenReady().then(async () => {
   });
 });
 
+// Deliberately does NOT quit. The window is hidden rather than destroyed, so
+// reaching here means it was genuinely torn down — and the bot should still be
+// answering WhatsApp. The tray's Quit is the only way out.
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  console.log('🪟 Window closed - LeadSender keeps running in the tray');
 });
 
 // Save state before quitting (campaigns and warmup will auto-resume on next start)
 app.on('before-quit', () => {
+  isQuitting = true;
   console.log('💾 App closing - state will be preserved in database for auto-resume');
   
   // Note: We don't need to do anything here!

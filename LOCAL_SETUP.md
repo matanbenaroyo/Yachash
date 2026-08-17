@@ -27,6 +27,37 @@ Windows paths containing spaces.
 
 ## 2. Start the application
 
+### Normal use — the installed app
+
+Double-click **LeadSender** on the desktop (or the Start menu). That runs the installed
+build at `C:\ביזנס\LeadSender\LeadSender.exe`. No terminal, no console window, no npm.
+
+It behaves like an ordinary Windows app, with two deliberate differences:
+
+| Action | What happens |
+|---|---|
+| Closing the window (X) | The window **hides**; the app keeps running and keeps answering WhatsApp. A tray icon stays in the notification area. |
+| Double-clicking the icon again | The **same** instance comes back — it never starts a second copy. |
+| Tray icon → *יציאה* | The only real exit. The bot stops answering. |
+
+This matters because everything that answers WhatsApp — `WhatsAppManager`, the chatbot and
+the FYI digest — runs in the main process. Quitting stops the bot.
+
+It also starts automatically when you log in, via a shortcut in the Startup folder.
+**This is at *logon*, not at power-on**: after a reboot, Windows sits at the sign-in
+screen and nothing runs until someone signs in. No autostart mechanism can change that
+while auto-logon is disabled — see §12.
+
+To reinstall after code changes:
+
+```bash
+npm run build:win
+```
+
+then run `release\LeadSender-Setup-4.0.3.exe`. It upgrades in place and keeps all data.
+
+### Development
+
 ```bash
 cd C:\Users\97250\projects\leadsender && npm run electron:dev
 ```
@@ -42,11 +73,15 @@ main process and restarts Electron automatically.
 
 ## 3. Stop the application
 
-Close the app window, or press `Ctrl+C` in the terminal running `npm run electron:dev`.
-If a process is orphaned:
+**Installed app:** right-click the tray icon → *יציאה*. Closing the window only hides it.
+
+**Development:** close the window, or `Ctrl+C` in the terminal running `npm run electron:dev`.
+
+Avoid `taskkill /F` — a forced kill leaves an un-checkpointed WAL, which is how the
+"disk image is malformed" state arises (§6). Close it gracefully instead:
 
 ```bash
-taskkill /F /IM electron.exe
+powershell -Command "Get-Process electron,LeadSender -EA SilentlyContinue | ForEach-Object { $_.CloseMainWindow() }"
 ```
 
 ---
@@ -120,6 +155,29 @@ Inside whichever directory is active:
 | `.license` | Activated license key |
 
 To reset the dev sandbox: close the app and delete `%APPDATA%\leadsender-dev`.
+
+### Production is now the authoritative database
+
+The chatbot was built in the dev sandbox while the real organizational data stayed in
+production, so the two were merged when the packaged app was installed. Production is
+the base — it held the 839 contacts, 9 tags, 822 tag links and the 62-node flow — and
+everything the chatbot needs was imported into it:
+
+| Imported from dev | Why it had to move |
+|---|---|
+| `settings` (11 rows) | Anthropic API key, staff routing, FYI groups, digest time |
+| `accounts` (2 rows) | `sessions/session-<id>/` folders are named after these ids — separating them forces a QR rescan |
+| `chatbot_*` tables | Knowledge base, conversations, escalations |
+| 76 contacts | Dev-only numbers, merged by `phone_number`; the 6 already in production were left alone |
+| `migrations` | So the placeholder-knowledge seed does not re-run |
+
+Result: **915 contacts**, `foreign_key_check: ok`, and the WhatsApp session still
+`connected` — no re-pairing was needed. The pre-merge state of both directories is kept
+in `%APPDATA%\leadsender-premigration-<timestamp>` and
+`%APPDATA%\leadsender-dev-premigration-<timestamp>`.
+
+The dev sandbox is now a stale copy. Do not run `npm run electron:dev` expecting to see
+production data, and do not run both at once against the same WhatsApp number.
 
 ### If the app reports "database disk image is malformed"
 
@@ -318,3 +376,43 @@ needs a new action. The engine, conversation state and IPC layer do not change.
 
 Real data for all five knowledge categories, and the staff WhatsApp numbers.
 Until then the bot will correctly say it has no information and escalate.
+
+---
+
+## 12. Always-on: what is actually guaranteed
+
+The bot answers WhatsApp only while `LeadSender.exe` is running. That gives four
+distinct levels, and only the first three are solved:
+
+| Situation | Bot answers? | Why |
+|---|---|---|
+| Window closed with X | **Yes** | The window hides; the process stays. Tray icon → *יציאה* is the only real exit. |
+| Signed in, machine idle | **Yes** | `powerSaveBlocker('prevent-app-suspension')` in `electron/main.ts` keeps the app alive if the power plan ever changes to allow sleep. |
+| Reboot, then someone signs in | **Yes** | Startup-folder shortcut → `C:\ביזנס\LeadSender\LeadSender.exe`. |
+| Computer off, asleep, or sitting at the sign-in screen | **No** | Nothing runs. |
+
+The last row cannot be fixed on this machine as configured. Windows does not run
+user applications before an interactive logon, and `AutoAdminLogon` is `0`, so a
+reboot parks at the sign-in screen until a person types the password. The options are:
+
+1. **Leave the PC signed in** and don't shut it down — what the current setup assumes.
+   Windows Update reboots will still interrupt it until someone signs back in.
+2. **Enable auto-logon**, which stores the account password in the registry and means
+   anyone who reboots the machine gets a signed-in desktop. A real security tradeoff;
+   not something to enable without deciding it deliberately.
+3. **Move the bot off this machine** — a small always-on VM or mini-PC — which is the
+   only option that genuinely survives power loss.
+
+Also worth knowing:
+
+- **Campaigns auto-resume on startup.** Any campaign left with `status='running'`
+  restarts sending when the app launches, so an unattended reboot can send real
+  messages. Today the only campaign is a `draft`, so nothing resumes. To make resume
+  manual, uncomment `campaignScheduler.pauseAll(); warmUpService.stopAll();` in the
+  `before-quit` handler in `electron/main.ts`.
+- **The app is unsigned.** The first run of a newly built `.exe` shows the SmartScreen
+  "Windows protected your PC" dialog — *More info* → *Run anyway*. It does not recur
+  for that binary, including on later automatic starts.
+- **Auto-update is off.** `electron/updater.ts` no longer checks on launch and never
+  installs on quit, so the binary is never replaced under a running bot. Updating means
+  `npm run build:win` and running the installer.
