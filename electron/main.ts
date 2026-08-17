@@ -322,6 +322,17 @@ app.whenReady().then(async () => {
   // Setup IPC handlers
   setupIPCHandlers();
 
+  // Drop Electron's stock application menu in production.
+  //
+  // autoHideMenuBar only hides it until Alt is pressed, and the default menu
+  // carries a Quit item — which now genuinely stops the bot, since closing the
+  // window merely hides it. Removing the menu closes that accidental exit, and
+  // takes the (already inert) Toggle Developer Tools entry with it. The
+  // right-click context menu is built separately and is unaffected.
+  if (!process.env.VITE_DEV_SERVER_URL) {
+    Menu.setApplicationMenu(null);
+  }
+
   createWindow();
   createTray();
 
