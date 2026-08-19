@@ -293,6 +293,10 @@ app.whenReady().then(async () => {
   // instance. Nothing below may touch the database or the session folder.
   if (!hasSingleInstanceLock) return;
 
+  // Persist logs to disk now that userData is settled. Everything above this
+  // point is still captured — the buffered backlog is written with the rest.
+  logger.setLogDirectory(path.join(app.getPath('userData'), 'logs'));
+
   // Register protocol handler for local files (chat photos, etc.)
   protocol.handle('local-file', (request) => {
     // URL comes as local-file:///C:/Users/... — strip scheme and leading slash before drive letter
@@ -378,6 +382,7 @@ app.on('before-quit', () => {
   // Fold the WAL back into the database file and close cleanly, so the next
   // launch opens a single consistent file instead of replaying a large WAL.
   if (hasSingleInstanceLock) closeDatabase();
+  logger.flushSync();
 });
 
 export { mainWindow };
