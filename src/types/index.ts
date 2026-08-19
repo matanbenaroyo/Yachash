@@ -415,6 +415,8 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<void>;
     connect: (id: string, proxy?: ProxyConfig, pairingMethod?: 'qr' | 'code') => Promise<void>;
     disconnect: (id: string) => Promise<void>;
+    reconnect: (id: string, proxy?: any) => Promise<void>;
+    resetSession: (id: string, proxy?: any) => Promise<void>;
     getQRCode: (id: string) => Promise<string>;
     updateWhatsAppName: (id: string, name: string) => Promise<void>;
     updateWhatsAppImage: (id: string, imagePath: string) => Promise<void>;

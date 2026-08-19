@@ -99,6 +99,42 @@ interface GroupAccessState {
   name: string;
 }
 
+/**
+ * How long a connection attempt may show NO sign of life before it is declared
+ * stuck. Deliberately generous: this is not a limit on how long connecting may
+ * take, only on how long it may take to produce its first signal.
+ */
+const CONNECT_SILENCE_TIMEOUT_MS = 90_000;
+
+/**
+ * Rejects if `promise` neither settles nor reports progress in time.
+ *
+ * `client.initialize()` can hang forever — a wedged puppeteer page never
+ * resolves and never throws. Racing it against a plain timeout is wrong,
+ * though: once a QR is on screen the flow is healthy and simply waiting for a
+ * human to scan it, which takes as long as it takes. So the clock is cancelled
+ * by the first real signal (`qr`, `code`, `ready`, `authenticated`,
+ * `loading_screen`) and only an attempt that is genuinely silent is killed.
+ */
+function rejectIfSilent<T>(
+  promise: Promise<T>,
+  isAlive: () => boolean,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (isAlive()) return; // progress was reported - let it run
+      reject(new Error(`${label} produced no response within ${Math.round(ms / 1000)}s`));
+    }, ms);
+    const done = () => clearTimeout(timer);
+    promise.then(
+      value => { done(); resolve(value); },
+      error => { done(); reject(error); },
+    );
+  });
+}
+
 export class WhatsAppManager {
   private db: Database;
   private clients: Map<string, Client> = new Map();
@@ -758,6 +794,14 @@ export class WhatsAppManager {
       console.log('🔌 Creating WhatsApp client...');
       const client = new Client(clientOptions);
 
+      // Liveness for the connect watchdog. Registered before the real handlers
+      // and kept separate from them, so "is this attempt alive?" stays one fact
+      // in one place rather than a flag five handlers have to remember to set.
+      let sawProgress = false;
+      for (const signal of ['qr', 'code', 'ready', 'authenticated', 'loading_screen']) {
+        client.on(signal as any, () => { sawProgress = true; });
+      }
+
       this.clients.set(accountId, client);
 
       this.grantWebPermissions(accountId, client);
@@ -1169,7 +1213,12 @@ export class WhatsAppManager {
       }
 
       try {
-        await client.initialize();
+        await rejectIfSilent(
+          client.initialize(),
+          () => sawProgress,
+          CONNECT_SILENCE_TIMEOUT_MS,
+          `Connecting account ${accountId}`,
+        );
         console.log('✅ Client initialized (this only reflects the outer initialize() call resolving - see the [Pairing:...] logs above for the actual pairing-code request outcome, since that runs fire-and-forget inside initialize() and does not reject it on failure)');
         if (pairingMethod === 'code' && phoneNumber) {
           this.requestPairingCodeAfterInitialize(accountId, client, phoneNumber, 180000);
@@ -1178,6 +1227,10 @@ export class WhatsAppManager {
         console.error(`${pairingTag} ❌ Error initializing client:`, error?.message || error);
         if (error?.stack) console.error(`${pairingTag} ❌ Stack:`, error.stack);
         await this.cleanupAccountResources(accountId, client);
+        // Leaving the row on 'connecting' after a failed attempt is what made
+        // this state look permanent: the UI showed a connection in progress
+        // that nothing was driving any more.
+        this.updateAccountStatus(accountId, 'disconnected');
         throw error;
       }
     } finally {
@@ -1188,6 +1241,52 @@ export class WhatsAppManager {
   async disconnectAccount(accountId: string): Promise<void> {
     await this.cleanupAccountResources(accountId, this.clients.get(accountId));
     this.updateAccountStatus(accountId, 'disconnected');
+  }
+
+  /**
+   * Tears the connection down and builds it again, keeping the saved login.
+   *
+   * This is the recovery path for an account that is wedged — the normal
+   * Connect button refuses to run while an attempt is registered as in
+   * progress, which is exactly the situation a stuck attempt creates. Cleanup
+   * clears that registration first, so this always gets through.
+   *
+   * The WhatsApp session on disk is untouched: no QR scan should be needed.
+   */
+  async reconnectAccount(accountId: string, proxy?: ProxyConfig): Promise<void> {
+    console.log('🔄 Force-reconnecting account:', accountId);
+    await this.cleanupAccountResources(accountId, this.clients.get(accountId));
+    this.updateAccountStatus(accountId, 'disconnected');
+    // Let the browser process actually die before a new one claims the same
+    // profile directory; two Chrome instances on one profile fail obscurely.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await this.connectAccount(accountId, proxy, 'qr');
+  }
+
+  /**
+   * Forgets the saved WhatsApp login and starts over, producing a fresh QR.
+   *
+   * For when the session itself is the problem — logged out from the phone,
+   * expired, or corrupted — rather than the connection. Destructive by design:
+   * the account must be paired again by scanning.
+   */
+  async resetAccountSession(accountId: string, proxy?: ProxyConfig): Promise<void> {
+    console.log('🧹 Resetting session for account:', accountId);
+    await this.cleanupAccountResources(accountId, this.clients.get(accountId));
+    this.updateAccountStatus(accountId, 'disconnected');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    const sessionPath = this.getSessionPath(accountId);
+    try {
+      await fs.promises.rm(sessionPath, { recursive: true, force: true });
+      console.log('🧹 Removed session folder:', sessionPath);
+    } catch (error: any) {
+      // A locked file here means a browser is still holding the profile;
+      // reporting it beats connecting against a half-deleted session.
+      throw new Error(`לא ניתן למחוק את הסשן (ייתכן שהדפדפן עדיין פתוח): ${error?.message ?? error}`);
+    }
+
+    await this.connectAccount(accountId, proxy, 'qr');
   }
 
   async sendMessage(accountId: string, to: string, message: string, isWarmup: boolean = false): Promise<void> {

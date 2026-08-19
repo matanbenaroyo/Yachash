@@ -119,6 +119,53 @@ export default function Accounts() {
     }
   };
 
+  /**
+   * Rebuilds the connection without touching the saved login.
+   *
+   * Unlike handleReconnect this does NOT refuse to run while the account reads
+   * as 'connecting' — a wedged attempt is stuck in exactly that state, and
+   * refusing there is what left it unrecoverable from the UI.
+   */
+  const handleRefreshConnection = async (accountId: string) => {
+    try {
+      setAccounts(prev => prev.map(a => a.id === accountId ? { ...a, status: 'connecting' } : a));
+      toast.success(language === 'he' ? 'מרענן את החיבור...' : 'Refreshing connection...');
+      await api.accounts.reconnect(accountId);
+      await loadAccounts();
+    } catch (error) {
+      console.error('Failed to refresh connection:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to refresh connection');
+      await loadAccounts();
+    }
+  };
+
+  /** Forgets the saved login; the account must be paired again by scanning. */
+  const handleResetSession = async (accountId: string) => {
+    const confirmed = window.confirm(
+      language === 'he'
+        ? 'פעולה זו תמחק את החיבור השמור ותדרוש סריקת QR מחדש מהטלפון. להמשיך?'
+        : 'This deletes the saved login and requires scanning a new QR from the phone. Continue?'
+    );
+    if (!confirmed) return;
+
+    try {
+      setReconnectAccountId(accountId);
+      setReconnectMethod('qr');
+      setReconnectQrCode('');
+      setReconnectPairingCode('');
+      setShowReconnectDialog(true);
+      setAccounts(prev => prev.map(a => a.id === accountId ? { ...a, status: 'connecting' } : a));
+
+      await api.accounts.resetSession(accountId);
+      toast.success(language === 'he' ? 'הסשן אופס - סרוק את ה-QR' : 'Session reset - scan the QR');
+    } catch (error) {
+      console.error('Failed to reset session:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to reset session');
+      setShowReconnectDialog(false);
+      await loadAccounts();
+    }
+  };
+
   const handleReconnect = async (accountId: string, method: 'qr' | 'code') => {
     const targetAccount = accounts.find(account => account.id === accountId);
 
@@ -446,6 +493,8 @@ export default function Accounts() {
               onDelete={() => handleDeleteClick(account.id)}
               onDisconnect={() => handleDisconnect(account.id)}
               onReconnect={(method) => handleReconnect(account.id, method)}
+              onRefreshConnection={() => handleRefreshConnection(account.id)}
+              onResetSession={() => handleResetSession(account.id)}
               selectionMode={selectionMode}
               isSelected={selectedAccountIds.has(account.id)}
               onSelect={(selected) => toggleAccountSelection(account.id, selected)}

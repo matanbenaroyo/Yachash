@@ -358,6 +358,18 @@ export function setupIPCHandlers() {
     await whatsappManager.disconnectAccount(id);
   });
 
+  ipcMain.handle('accounts:reconnect', async (_event, id: string, proxy?: any) => {
+    const account = db.prepare('SELECT name, phone_number FROM accounts WHERE id = ?').get(id) as any;
+    await whatsappManager.reconnectAccount(id, proxy);
+    logActivity(db, 'account', `Account ${account?.name || account?.phone_number || 'Unknown'} connection refreshed`, id);
+  });
+
+  ipcMain.handle('accounts:resetSession', async (_event, id: string, proxy?: any) => {
+    const account = db.prepare('SELECT name, phone_number FROM accounts WHERE id = ?').get(id) as any;
+    await whatsappManager.resetAccountSession(id, proxy);
+    logActivity(db, 'account', `Account ${account?.name || account?.phone_number || 'Unknown'} session reset - new QR required`, id);
+  });
+
   ipcMain.handle('accounts:getQRCode', async (_event, id: string) => {
     return await whatsappManager.getQRCode(id);
   });

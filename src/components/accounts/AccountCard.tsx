@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Wifi, WifiOff, Trash2, Globe, Smartphone, MoreVertical, QrCode, Hash, Cloud } from 'lucide-react';
+import { Wifi, WifiOff, Trash2, Globe, Smartphone, MoreVertical, QrCode, Hash, Cloud, RefreshCw, RotateCcw } from 'lucide-react';
 import { formatDistance } from 'date-fns';
 import { he, ar } from 'date-fns/locale';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -25,13 +25,17 @@ interface AccountCardProps {
   onDelete: () => void;
   onDisconnect: () => void;
   onReconnect?: (method: 'qr' | 'code') => void;
+  /** Rebuild the connection, keeping the saved login. Available in any state. */
+  onRefreshConnection?: () => void;
+  /** Forget the saved login and pair again from a new QR. Destructive. */
+  onResetSession?: () => void;
   isSelected?: boolean;
   onSelect?: (selected: boolean) => void;
   selectionMode?: boolean;
   onUpdated?: () => void;
 }
 
-export default function AccountCard({ account, onDelete, onDisconnect, onReconnect, isSelected, onSelect, selectionMode, onUpdated }: AccountCardProps) {
+export default function AccountCard({ account, onDelete, onDisconnect, onReconnect, onRefreshConnection, onResetSession, isSelected, onSelect, selectionMode, onUpdated }: AccountCardProps) {
   const { t, language } = useLanguage();
   const isConnected = account.status === 'connected';
   const canReconnect = account.status === 'disconnected' || account.status === 'qr';
@@ -124,6 +128,24 @@ export default function AccountCard({ account, onDelete, onDisconnect, onReconne
                   </>
                 )}
                 
+                {/* Recovery actions, deliberately shown in EVERY state.
+                    A connection that wedges leaves the account on 'connecting',
+                    which is exactly when the options above are hidden — so the
+                    one state that needs recovery had none available. */}
+                {onRefreshConnection && (
+                  <DropdownMenuItem onClick={onRefreshConnection} className="text-blue-600">
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    {language === 'he' ? 'רענון חיבור' : 'Refresh connection'}
+                  </DropdownMenuItem>
+                )}
+                {onResetSession && (
+                  <DropdownMenuItem onClick={onResetSession} className="text-amber-600">
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                    {language === 'he' ? 'איפוס סשן וסריקת QR מחדש' : 'Reset session & rescan QR'}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuSeparator />
+
                 <DropdownMenuItem onClick={() => setShowDeviceIdDialog(true)} className="text-indigo-600">
                   <Cloud className="mr-2 h-4 w-4" />
                   {account.duoplus_device_id
