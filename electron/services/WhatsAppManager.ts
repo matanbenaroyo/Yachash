@@ -135,6 +135,56 @@ function rejectIfSilent<T>(
   });
 }
 
+/**
+ * Kills any browser still holding a session profile directory.
+ *
+ * puppeteer browsers are children of this process, but they do not die with it:
+ * if the app is killed rather than closed — a force-quit, a crash, an installer
+ * replacing the binary — Chrome keeps running, orphaned, holding an exclusive
+ * lock on its `--user-data-dir`. Every later connect attempt then fails to open
+ * that profile and hangs with no error, which is indistinguishable from a
+ * network problem and survives restarts, because nothing ever cleans it up.
+ *
+ * Matching is by the session path in the command line, so only browsers for
+ * this exact account are touched — never the user's own Chrome.
+ */
+async function killBrowsersHoldingSession(sessionPath: string): Promise<number> {
+  const { promisify } = await import('util');
+  const execFile = promisify((await import('child_process')).execFile);
+  const marker = path.basename(sessionPath); // session-<accountId>
+
+  try {
+    if (process.platform === 'win32') {
+      const script =
+        `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+        `Where-Object { $_.CommandLine -like '*${marker}*' } | ` +
+        `ForEach-Object { $_.ProcessId }`;
+      const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 20000 });
+      const pids = stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      for (const pid of pids) {
+        try { process.kill(Number(pid), 'SIGKILL'); } catch { /* already gone */ }
+      }
+      return pids.length;
+    }
+
+    // Linux/macOS - what the cloud deployment will run on.
+    const { stdout } = await execFile('ps', ['-eo', 'pid,args'], { timeout: 20000 });
+    const pids = stdout
+      .split('\n')
+      .filter(line => line.includes(marker) && !line.includes('ps -eo'))
+      .map(line => line.trim().split(/\s+/)[0])
+      .filter(Boolean);
+    for (const pid of pids) {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* already gone */ }
+    }
+    return pids.length;
+  } catch (error: any) {
+    // Never block a connection attempt because the sweep itself failed.
+    console.warn('⚠️ Could not sweep for orphaned browsers:', error?.message ?? error);
+    return 0;
+  }
+}
+
 export class WhatsAppManager {
   private db: Database;
   private clients: Map<string, Client> = new Map();
@@ -547,8 +597,26 @@ export class WhatsAppManager {
   }
 
   private async loadExistingSessions() {
-    const stmt = this.db.prepare("SELECT * FROM accounts WHERE status IN ('connected', 'connecting', 'qr') OR session_path IS NOT NULL");
-    const accounts = stmt.all() as any[];
+    // What decides whether to restore an account is whether a saved WhatsApp
+    // login exists ON DISK — not the status column.
+    //
+    // The status is written by the previous run, and a failed connection sets
+    // it to 'disconnected'. Selecting on status therefore excluded exactly the
+    // accounts that most needed reconnecting: one bad attempt and the account
+    // was skipped by every subsequent startup, forever, until somebody clicked
+    // Connect by hand. session_path was no help either — nothing ever writes
+    // it, so it is NULL for every row.
+    const allAccounts = this.db.prepare('SELECT * FROM accounts').all() as any[];
+    const accounts = allAccounts.filter(account => {
+      if (['connected', 'connecting', 'qr'].includes(account.status)) return true;
+      if (account.session_path) return true;
+      try {
+        return fs.existsSync(this.getSessionPath(account.id));
+      } catch {
+        return false;
+      }
+    });
+    console.log(`🔎 ${accounts.length}/${allAccounts.length} account(s) have a saved session to restore`);
 
     // Sync progress state with actual fetched accounts
     this.initProgress = {
@@ -660,6 +728,17 @@ export class WhatsAppManager {
       const userDataPath = app.getPath('userData');
       const sessionPath = this.getSessionPath(accountId);
       console.log('📁 Session path:', sessionPath);
+
+      // Clear any browser left holding this profile before launching a new one.
+      // Unconditional, not just when we have tracked resources: the orphan that
+      // matters most is the one from a PREVIOUS run of the app, which this
+      // process knows nothing about.
+      const swept = await killBrowsersHoldingSession(sessionPath);
+      if (swept > 0) {
+        console.log(`🧹 Killed ${swept} orphaned browser process(es) holding ${path.basename(sessionPath)}`);
+        // Give Windows a moment to release the profile's file locks.
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
 
       this.sessionsPaths.set(accountId, sessionPath);
 
@@ -1227,6 +1306,10 @@ export class WhatsAppManager {
         console.error(`${pairingTag} ❌ Error initializing client:`, error?.message || error);
         if (error?.stack) console.error(`${pairingTag} ❌ Stack:`, error.stack);
         await this.cleanupAccountResources(accountId, client);
+        // An attempt aborted by the watchdog has usually not finished wiring up
+        // its browser handle, so the cleanup above has nothing to close and the
+        // process leaks — becoming the orphan that blocks the next attempt.
+        await killBrowsersHoldingSession(sessionPath);
         // Leaving the row on 'connecting' after a failed attempt is what made
         // this state look permanent: the UI showed a connection in progress
         // that nothing was driving any more.
@@ -1277,6 +1360,10 @@ export class WhatsAppManager {
     await new Promise(resolve => setTimeout(resolve, 1500));
 
     const sessionPath = this.getSessionPath(accountId);
+    // A browser still holding the profile makes the delete below fail on
+    // Windows with a locked-file error.
+    await killBrowsersHoldingSession(sessionPath);
+    await new Promise(resolve => setTimeout(resolve, 1500));
     try {
       await fs.promises.rm(sessionPath, { recursive: true, force: true });
       console.log('🧹 Removed session folder:', sessionPath);
