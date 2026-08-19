@@ -72,8 +72,17 @@ export class FyiDigestScheduler {
       const todayKey = now.toISOString().slice(0, 10);
       if (this.getLastRunDate() === todayKey) return; // already sent today
 
-      await this.buildAndSend(now, false);
-      this.setLastRunDate(todayKey);
+      // Only record the day as done if it actually went out. Marking it
+      // unconditionally meant a failed send — no WhatsApp account, a network
+      // blip, groups unreachable — silently discarded that whole day's digest:
+      // the guard above then skipped every retry until tomorrow, and the queued
+      // messages were never mentioned again.
+      const result = await this.buildAndSend(now, false);
+      if (result.ok || result.count === 0) {
+        this.setLastRunDate(todayKey);
+      } else {
+        console.warn('🗞️ FYI digest did not send; will retry on the next tick:', result.error ?? 'unknown');
+      }
     } finally {
       this.running = false;
     }

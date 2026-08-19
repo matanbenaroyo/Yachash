@@ -151,7 +151,7 @@ async function initializeServices() {
   const db = getDatabase();
   
   console.log('🚀 Initializing WhatsApp and Campaign services...');
-  whatsappManager = new WhatsAppManager(db);
+  whatsappManager = new WhatsAppManager(getDatabase);
   campaignScheduler = new CampaignScheduler(db, whatsappManager, duoplusManager);
   warmUpService = new WarmUpService(db, whatsappManager);
   inboxManager = new InboxManager(db, whatsappManager);
@@ -168,6 +168,11 @@ async function initializeServices() {
   whatsappManager.setChatbotService(chatbotService);
   console.log('🤖 ChatbotService wired', chatbotService.getConfig().enabled ? '(enabled)' : '(disabled)');
   fyiDigestScheduler.start();
+
+  // Prove connections are alive on an interval and rebuild the ones that are
+  // not. Without this the only reconnect attempt in the app's entire lifetime
+  // was the one at startup.
+  whatsappManager.startHealthMonitor();
 
   // Wire campaign scheduler so accounts trigger campaign resume on ready
   whatsappManager.setCampaignScheduler(campaignScheduler);
@@ -3024,6 +3029,34 @@ export function setupIPCHandlers() {
     db.prepare(`UPDATE chatbot_conversations SET status = 'completed' WHERE phone_number = ? AND status = 'active'`)
       .run(phoneNumber);
   });
+}
+
+/**
+ * Starts the bot without waiting for a window.
+ *
+ * initializeServices was reachable only from the license:check and
+ * license:activate IPC handlers — that is, only once a renderer had loaded and
+ * asked for it. A window that never opens, or a renderer that fails, meant the
+ * WhatsApp client and the chatbot were never constructed at all while the app
+ * itself looked perfectly healthy. On a headless host there is no renderer to
+ * ask, so the bot would simply never start.
+ *
+ * The renderer path still works and is idempotent; whichever gets there first
+ * wins.
+ */
+export async function startServicesFromMain(): Promise<void> {
+  if (servicesInitialized) return;
+  try {
+    const info = await licenseManager.checkLicense();
+    if (info.isValid) {
+      console.log('✅ License valid - starting services from the main process');
+      await initializeServices();
+      return;
+    }
+    console.warn('⚠️ Services not started from main - license reported invalid:', info.error ?? 'unknown reason');
+  } catch (error: any) {
+    console.error('❌ License check threw while starting services:', error?.message ?? error);
+  }
 }
 
 export { whatsappManager, campaignScheduler, warmUpService, inboxManager };

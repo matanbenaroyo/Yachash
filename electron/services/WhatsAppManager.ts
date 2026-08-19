@@ -106,6 +106,15 @@ interface GroupAccessState {
  */
 const CONNECT_SILENCE_TIMEOUT_MS = 90_000;
 
+/** How often to prove each connected account is still really connected. */
+const HEALTH_CHECK_INTERVAL_MS = 90_000;
+
+/** A health probe that does not answer in this long counts as a failure. */
+const HEALTH_PROBE_TIMEOUT_MS = 20_000;
+
+/** Consecutive failed probes before an account is rebuilt. */
+const UNHEALTHY_STRIKES = 2;
+
 /**
  * Rejects if `promise` neither settles nor reports progress in time.
  *
@@ -186,7 +195,23 @@ async function killBrowsersHoldingSession(sessionPath: string): Promise<number> 
 }
 
 export class WhatsAppManager {
-  private db: Database;
+  /**
+   * Resolves the CURRENT database handle on every use.
+   *
+   * Holding the handle by value looked equivalent, but the recovery path
+   * (reopenDatabase) closes that handle and installs a replacement. Anything
+   * still holding the old one then throws on every statement — and since the
+   * message-ingest path runs inside a blanket catch that only logs, the effect
+   * was that incoming messages silently stopped being processed, permanently,
+   * with the account still showing as connected. ChatbotService already takes a
+   * getter for exactly this reason.
+   */
+  private resolveDb: () => Database;
+
+  private get db(): Database {
+    return this.resolveDb();
+  }
+
   private clients: Map<string, Client> = new Map();
   private sessionsPaths: Map<string, string> = new Map();
   private readyAccounts: Set<string> = new Set(); // Track which accounts are fully ready
@@ -210,9 +235,16 @@ export class WhatsAppManager {
   // Key: "accountId:messageText" -> timestamp
   private recentlySentMessages: Map<string, number> = new Map();
 
-  constructor(db: Database) {
-    this.db = db;
-    this.chatManager = new ChatManager(db);
+  private healthTimer: NodeJS.Timeout | null = null;
+  private healthCheckRunning = false;
+  /** Consecutive failed health probes, per account. */
+  private unhealthyCounts: Map<string, number> = new Map();
+  /** Reconnect attempts for accounts with a session but no live client. */
+  private dormantRetries: Map<string, number> = new Map();
+
+  constructor(dbOrGetter: Database | (() => Database)) {
+    this.resolveDb = typeof dbOrGetter === 'function' ? dbOrGetter : () => dbOrGetter;
+    this.chatManager = new ChatManager(this.db);
 
     // Synchronously determine initial count so the frontend can query
     // the correct status even before loadExistingSessions starts connecting.
@@ -1276,6 +1308,22 @@ export class WhatsAppManager {
         await this.handleIncomingMessage(accountId, message);
       });
 
+      // Nothing observed these before, so CONFLICT (the session opened
+      // elsewhere) and UNPAIRED (removed from the phone) looked identical to a
+      // healthy connection: the status column simply stayed 'connected'.
+      client.on('change_state', (state: string) => {
+        if (!this.isTrackedClient(accountId, client)) return;
+        console.log(`🔀 change_state for ${accountId}: ${state}`);
+        if (state === 'CONNECTED') {
+          this.unhealthyCounts.delete(accountId);
+          return;
+        }
+        if (['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'DEPRECATED_VERSION'].includes(state)) {
+          console.warn(`⚠️ Account ${accountId} is no longer usable (${state})`);
+          this.updateAccountStatus(accountId, 'disconnected');
+        }
+      });
+
       client.on('loading_screen', (percent) => {
         if (!this.isTrackedClient(accountId, client)) {
           return;
@@ -1318,6 +1366,144 @@ export class WhatsAppManager {
       }
     } finally {
       this.connectingAccounts.delete(accountId);
+    }
+  }
+
+  /**
+   * Proves each connected account is still alive, and reconnects it if not.
+   *
+   * `status='connected'` was written once, when 'ready' fired, and nothing ever
+   * re-read it. A page that wedges, a session unpaired from the phone, or a
+   * browser killed underneath us all left the account permanently green while
+   * no message had arrived for days. Nothing retried either — the only
+   * reconnect attempt in the app's life was at startup.
+   *
+   * getState() is the probe because it round-trips into the page: it fails when
+   * the bridge is broken, which is the condition that matters and the one a
+   * status column cannot express.
+   */
+  startHealthMonitor(): void {
+    if (this.healthTimer) return;
+    this.healthTimer = setInterval(() => {
+      this.runHealthCheck().catch(e => console.error('💓 Health check failed:', e?.message ?? e));
+    }, HEALTH_CHECK_INTERVAL_MS);
+    console.log(`💓 WhatsApp health monitor started (every ${HEALTH_CHECK_INTERVAL_MS / 1000}s)`);
+  }
+
+  stopHealthMonitor(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+  }
+
+  private async runHealthCheck(): Promise<void> {
+    if (this.healthCheckRunning) return; // a slow probe must not stack up
+    this.healthCheckRunning = true;
+    try {
+      for (const [accountId, client] of Array.from(this.clients.entries())) {
+        if (this.connectingAccounts.has(accountId)) continue; // mid-connect, not yet its business
+
+        let state: string | null = null;
+        try {
+          state = await rejectIfSilent(
+            (client as any).getState(),
+            () => false,
+            HEALTH_PROBE_TIMEOUT_MS,
+            `Health probe for ${accountId}`,
+          );
+        } catch (error: any) {
+          console.warn(`💔 State probe failed for ${accountId}:`, error?.message ?? error);
+        }
+
+        // getState() alone is not enough, and this is the whole point of the
+        // check. It reports the socket, which stays CONNECTED after the page
+        // reloads — but whatsapp-web.js re-injects its listeners in a
+        // fire-and-forget handler that can fail silently. When it does,
+        // window.onAddMessageEvent is gone, client.on('message') can never fire
+        // again, and every other signal still says the account is fine. That is
+        // exactly how this account went days without receiving anything while
+        // showing as connected. So probe the injected bridge itself.
+        let bridgeAlive = false;
+        try {
+          bridgeAlive = await rejectIfSilent(
+            (client as any).pupPage.evaluate(
+              () => typeof (window as any).WWebJS !== 'undefined'
+                && typeof (window as any).onAddMessageEvent === 'function',
+            ),
+            () => false,
+            HEALTH_PROBE_TIMEOUT_MS,
+            `Bridge probe for ${accountId}`,
+          );
+        } catch (error: any) {
+          console.warn(`💔 Bridge probe failed for ${accountId}:`, error?.message ?? error);
+        }
+
+        if (state === 'CONNECTED' && bridgeAlive) {
+          this.unhealthyCounts.delete(accountId);
+          // Logged on every pass, not just on failure: on an unattended host a
+          // silent monitor is indistinguishable from one that died, and this
+          // line is the only positive proof the bot can still receive.
+          console.log(`💓 ${accountId} healthy (socket CONNECTED, message bridge alive)`);
+          continue;
+        }
+
+        // One bad probe can be a hiccup; two in a row is a broken bridge.
+        const strikes = (this.unhealthyCounts.get(accountId) ?? 0) + 1;
+        this.unhealthyCounts.set(accountId, strikes);
+        console.warn(
+          `💔 Account ${accountId} unhealthy (state=${state ?? 'no response'}, ` +
+          `messageBridge=${bridgeAlive ? 'alive' : 'DEAD'}, strike ${strikes}/${UNHEALTHY_STRIKES})`,
+        );
+
+        if (strikes < UNHEALTHY_STRIKES) continue;
+
+        this.unhealthyCounts.delete(accountId);
+        console.warn(`🔄 Reconnecting ${accountId} after ${strikes} failed health checks`);
+        this.updateAccountStatus(accountId, 'disconnected');
+        try {
+          await this.reconnectAccount(accountId);
+          console.log(`✅ Recovered ${accountId} automatically`);
+        } catch (error: any) {
+          // Leave it disconnected; the next tick will try again.
+          console.error(`❌ Automatic recovery failed for ${accountId}:`, error?.message ?? error);
+        }
+      }
+
+      // An account with a saved login that is not connected at all — because a
+      // previous attempt failed — is also this loop's problem. Without this,
+      // recovery only ever happened at startup.
+      await this.retryDormantAccounts();
+    } finally {
+      this.healthCheckRunning = false;
+    }
+  }
+
+  /** Reconnects accounts that have a session on disk but no live client. */
+  private async retryDormantAccounts(): Promise<void> {
+    let rows: any[] = [];
+    try {
+      rows = this.db.prepare("SELECT id FROM accounts WHERE status != 'connected'").all() as any[];
+    } catch {
+      return;
+    }
+
+    for (const row of rows) {
+      if (this.clients.has(row.id) || this.connectingAccounts.has(row.id)) continue;
+      if (!fs.existsSync(this.getSessionPath(row.id))) continue;
+
+      const attempts = (this.dormantRetries.get(row.id) ?? 0) + 1;
+      this.dormantRetries.set(row.id, attempts);
+      // Back off so a genuinely dead session is not retried every minute
+      // forever — WhatsApp treats a reconnect storm as abuse.
+      if (attempts > 1 && attempts % Math.min(attempts, 5) !== 0) continue;
+
+      console.log(`🔄 Retrying dormant account ${row.id} (attempt ${attempts})`);
+      try {
+        await this.reconnectAccount(row.id);
+        this.dormantRetries.delete(row.id);
+        console.log(`✅ Dormant account ${row.id} reconnected`);
+      } catch (error: any) {
+        console.error(`❌ Dormant retry failed for ${row.id}:`, error?.message ?? error);
+      }
     }
   }
 

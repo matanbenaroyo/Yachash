@@ -121,7 +121,10 @@ export class ChatbotService {
     let conversation = this.conversations.getOrCreate(accountId, phoneNumber, now);
     this.conversations.appendTurn(conversation.id, { role: 'user', content: text });
 
-    const client = new Anthropic({ apiKey: config.apiKey });
+    // Bound every API call. The SDK defaults to a 10-minute timeout with
+    // retries, and turns are serialized per contact — so one hung request could
+    // park a person's queue for half an hour while they saw only silence.
+    const client = new Anthropic({ apiKey: config.apiKey, timeout: 30_000, maxRetries: 1 });
 
     try {
       const recentTurns = this.conversations.recentTurns(conversation.id, config.historyTurns);

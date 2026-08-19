@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow, Menu, Tray, nativeImage, powerSaveBlocker, protocol } from 'electron';
 import { initDatabase, closeDatabase } from './database/index';
-import { setupIPCHandlers, campaignScheduler, warmUpService } from './ipc';
+import { setupIPCHandlers, startServicesFromMain, campaignScheduler, warmUpService } from './ipc';
 import { logger } from './logger';
 import { setupAutoUpdater, setUpdaterMainWindow } from './updater';
 
@@ -336,6 +336,11 @@ app.whenReady().then(async () => {
   if (!process.env.VITE_DEV_SERVER_URL) {
     Menu.setApplicationMenu(null);
   }
+
+  // Start the bot from here rather than waiting for the renderer to ask.
+  // Deliberately not awaited: a slow or failing license lookup must not delay
+  // the window, and the renderer's own check remains as a fallback.
+  startServicesFromMain().catch(e => console.error('❌ startServicesFromMain failed:', e?.message ?? e));
 
   createWindow();
   createTray();
