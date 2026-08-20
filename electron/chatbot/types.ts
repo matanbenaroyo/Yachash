@@ -152,6 +152,10 @@ export interface ChatbotConfig {
   fyiGroups: Array<{ chatId: string; label: string }>;
   /** Daily digest time, 24h "HH:MM". Empty disables the digest. */
   fyiDigestTime: string;
+  /** Where operational alerts and the daily heartbeat go. Empty disables both. */
+  alertPhone: string;
+  /** Time of day for the "still alive" heartbeat, HH:MM. */
+  heartbeatTime: string;
 }
 
 export interface KnowledgeSearchParams {

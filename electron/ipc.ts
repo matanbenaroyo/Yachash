@@ -16,6 +16,7 @@ import { KnowledgeService } from './chatbot/knowledge/KnowledgeService';
 import { getChatbotConfig, saveChatbotConfig } from './chatbot/config';
 import { WORKFLOWS } from './chatbot/workflows';
 import { FyiDigestScheduler } from './chatbot/FyiDigestScheduler';
+import { HealthReporter } from './chatbot/HealthReporter';
 import { logger } from './logger';
 import * as XLSX from 'xlsx';
 import fs from 'fs';
@@ -33,6 +34,7 @@ let duoplusManager: DuoPlusManager;
 let chatbotService: ChatbotService;
 let knowledgeService: KnowledgeService;
 let fyiDigestScheduler: FyiDigestScheduler;
+let healthReporter: HealthReporter;
 
 // Helper function to normalize phone numbers for matching
 function normalizePhoneForMatching(phone: string): string[] {
@@ -168,6 +170,8 @@ async function initializeServices() {
   whatsappManager.setChatbotService(chatbotService);
   console.log('🤖 ChatbotService wired', chatbotService.getConfig().enabled ? '(enabled)' : '(disabled)');
   fyiDigestScheduler.start();
+  healthReporter.start();
+  whatsappManager.setHealthReporter(healthReporter);
 
   // Prove connections are alive on an interval and rebuild the ones that are
   // not. Without this the only reconnect attempt in the app's entire lifetime
@@ -202,6 +206,9 @@ export function setupIPCHandlers() {
   // services must pick up the new one rather than keep using a dead handle.
   chatbotService = new ChatbotService(getDatabase);
   knowledgeService = new KnowledgeService(getDatabase);
+
+  // Operational alerting for a host with no screen.
+  healthReporter = new HealthReporter(getDatabase, () => whatsappManager);
 
   // Daily FYI digest. Resolves the WhatsApp manager and account lazily, because
   // neither exists until a license validates and an account connects.

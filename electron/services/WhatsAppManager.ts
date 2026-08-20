@@ -235,6 +235,7 @@ export class WhatsAppManager {
   // Key: "accountId:messageText" -> timestamp
   private recentlySentMessages: Map<string, number> = new Map();
 
+  private healthReporter: any | null = null;
   private healthTimer: NodeJS.Timeout | null = null;
   private healthCheckRunning = false;
   /** Consecutive failed health probes, per account. */
@@ -279,6 +280,11 @@ export class WhatsAppManager {
 
   setFlowEngine(flowEngine: FlowEngine) {
     this.flowEngine = flowEngine;
+  }
+
+  /** Optional. Receives operational alerts when recovery fails. */
+  setHealthReporter(reporter: any) {
+    this.healthReporter = reporter;
   }
 
   setChatbotService(service: any) {
@@ -1463,8 +1469,13 @@ export class WhatsAppManager {
           await this.reconnectAccount(accountId);
           console.log(`✅ Recovered ${accountId} automatically`);
         } catch (error: any) {
-          // Leave it disconnected; the next tick will try again.
+          // Leave it disconnected; the next tick will try again. But say so out
+          // loud — an unattended host has nobody reading the log.
           console.error(`❌ Automatic recovery failed for ${accountId}:`, error?.message ?? error);
+          this.healthReporter?.alert(
+            `reconnect-failed:${accountId}`,
+            `החיבור של החשבון נותק והשחזור האוטומטי נכשל.\nהבוט לא עונה להודעות כרגע.\n\nשגיאה: ${error?.message ?? error}`,
+          ).catch(() => undefined);
         }
       }
 

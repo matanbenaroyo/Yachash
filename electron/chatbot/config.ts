@@ -32,6 +32,8 @@ const DEFAULTS: ChatbotConfig = {
   fyiSenders: DEFAULT_FYI_SENDERS,
   fyiGroups: DEFAULT_FYI_GROUPS,
   fyiDigestTime: '16:00',
+  alertPhone: '',
+  heartbeatTime: '08:00',
 };
 
 export function getChatbotConfig(db: any): ChatbotConfig {
@@ -114,6 +116,7 @@ export function getChatbotConfig(db: any): ChatbotConfig {
   }
 
   const digestTime = (read('fyiDigestTime', '16:00') as string).trim();
+  const heartbeatTime = (read('heartbeatTime', '08:00') as string).trim();
 
   return {
     enabled: read('enabled', '0') === '1',
@@ -129,6 +132,8 @@ export function getChatbotConfig(db: any): ChatbotConfig {
     fyiSenders,
     fyiGroups,
     fyiDigestTime: /^\d{1,2}:\d{2}$/.test(digestTime) ? digestTime : '16:00',
+    alertPhone: normalizePhone(read('alertPhone', '') as string),
+    heartbeatTime: /^\d{1,2}:\d{2}$/.test(heartbeatTime) ? heartbeatTime : '08:00',
   };
 }
 

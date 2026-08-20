@@ -342,6 +342,27 @@ function SettingsTab({ config, save, saving, workflows }: any) {
             </p>
           </div>
 
+          <div className="rounded-lg border p-4 space-y-3">
+            <div>
+              <Label htmlFor="alertPhone">מספר להתרעות תפעוליות</Label>
+              <Input id="alertPhone" value={form.alertPhone ?? ''} placeholder="972501234567"
+                onChange={e => set('alertPhone', e.target.value)} />
+              <p className="text-xs text-muted-foreground mt-1">
+                לכאן נשלחות התרעות כשהבוט לא מצליח להתאושש, וגם הודעת "הבוט פעיל" יומית.
+                השאר ריק כדי לכבות את שניהם.
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="heartbeat">שעת הודעת "הבוט פעיל"</Label>
+              <Input id="heartbeat" className="max-w-[8rem]" value={form.heartbeatTime ?? ''} placeholder="08:00"
+                onChange={e => set('heartbeatTime', e.target.value)} />
+              <p className="text-xs text-muted-foreground mt-1">
+                אם ההודעה הזו <b>לא</b> מגיעה — זה הסימן שמשהו נפל. זה עובד גם כשהמחשב כבוי
+                או שאין רשת, בניגוד להתרעה שתלויה במערכת שאולי שבורה.
+              </p>
+            </div>
+          </div>
+
           <div>
             <Label>מורשים לשלוח ({(form.fyiSenders ?? []).length})</Label>
             <div className="space-y-2 mt-2 max-h-[22rem] overflow-auto pl-1">
