@@ -66,9 +66,9 @@ const searchOrders: ChatbotTool = {
     required: ['query'],
   },
   execute: (input, ctx) => {
-    const results = knowledge(ctx).search({ query: String(input.query ?? ''), category: 'orders' });
+    const { results, fromGeneral } = searchWithGeneralFallback(ctx, String(input.query ?? ''), 'orders');
     return results.length
-      ? { ok: true, data: present(results) }
+      ? { ok: true, data: present(results), fromGeneralKnowledge: fromGeneral || undefined }
       : { ok: true, notFound: true, error: 'לא נמצאה פקודה מתאימה במאגר' };
   },
 };
@@ -99,6 +99,34 @@ const getOrderStatus: ChatbotTool = {
   },
 };
 
+/**
+ * Searches a category, then the general base if that category has nothing.
+ *
+ * Category scoping was absolute, so a fact was findable only if it happened to
+ * be filed under the category the intent classifier picked. "מתי יש קק״צ 93"
+ * classifies as a schedule question and searched only `replacements`; the event
+ * was in `general`, so the bot reported that it had no such information while
+ * the row sat one category away. The unit's material does not divide cleanly
+ * into five buckets, and the phrasing of a question should not decide whether
+ * an answer exists.
+ *
+ * The fallback is flagged in the result so the model can see the answer came
+ * from general knowledge rather than from that specific register.
+ */
+function searchWithGeneralFallback(
+  ctx: WorkflowContext,
+  query: string,
+  category: 'replacements' | 'orders' | 'development_tracks' | 'open_calls',
+  opts: { filters?: Record<string, string>; limit?: number } = {},
+) {
+  const svc = knowledge(ctx);
+  const primary = svc.search({ query, category, ...opts });
+  if (primary.length) return { results: primary, fromGeneral: false };
+
+  const general = svc.search({ query, category: 'general', ...opts });
+  return { results: general, fromGeneral: general.length > 0 };
+}
+
 const searchReplacementSchedule: ChatbotTool = {
   name: 'searchReplacementSchedule',
   description:
@@ -110,9 +138,9 @@ const searchReplacementSchedule: ChatbotTool = {
     required: [],
   },
   execute: (input, ctx) => {
-    const results = knowledge(ctx).search({ query: String(input.query ?? ''), category: 'replacements' });
+    const { results, fromGeneral } = searchWithGeneralFallback(ctx, String(input.query ?? ''), 'replacements');
     return results.length
-      ? { ok: true, data: present(results) }
+      ? { ok: true, data: present(results), fromGeneralKnowledge: fromGeneral || undefined }
       : { ok: true, notFound: true, error: 'לא נמצא לו״ז החלפה במאגר' };
   },
 };
@@ -153,8 +181,14 @@ const searchDevelopmentTracks: ChatbotTool = {
     if (!results.length && filters) {
       results = knowledge(ctx).search({ query: String(input.query ?? ''), category: 'development_tracks', limit: 10 });
     }
+    let fromGeneral = false;
+    if (!results.length) {
+      const fallback = searchWithGeneralFallback(ctx, String(input.query ?? ''), 'development_tracks', { limit: 10 });
+      results = fallback.results;
+      fromGeneral = fallback.fromGeneral;
+    }
     return results.length
-      ? { ok: true, data: present(results) }
+      ? { ok: true, data: present(results), fromGeneralKnowledge: fromGeneral || undefined }
       : { ok: true, notFound: true, error: 'לא נמצאו מסלולי פיתוח במאגר' };
   },
 };
@@ -168,9 +202,9 @@ const searchOpenCalls: ChatbotTool = {
     required: [],
   },
   execute: (input, ctx) => {
-    const results = knowledge(ctx).search({ query: String(input.query ?? ''), category: 'open_calls' });
+    const { results, fromGeneral } = searchWithGeneralFallback(ctx, String(input.query ?? ''), 'open_calls');
     return results.length
-      ? { ok: true, data: present(results) }
+      ? { ok: true, data: present(results), fromGeneralKnowledge: fromGeneral || undefined }
       : { ok: true, notFound: true, error: 'לא נמצא קול קורא פתוח במאגר' };
   },
 };
