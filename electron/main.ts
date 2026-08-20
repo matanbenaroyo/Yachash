@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow, Menu, Tray, nativeImage, powerSaveBlocker, protocol } from 'electron';
-import { initDatabase, closeDatabase } from './database/index';
+import { initDatabase, closeDatabase, backupDatabase } from './database/index';
 import { setupIPCHandlers, startServicesFromMain, campaignScheduler, warmUpService } from './ipc';
 import { logger } from './logger';
 import { setupAutoUpdater, setUpdaterMainWindow } from './updater';
@@ -336,6 +336,12 @@ app.whenReady().then(async () => {
   if (!process.env.VITE_DEV_SERVER_URL) {
     Menu.setApplicationMenu(null);
   }
+
+  // Back up on a timer, not only on shutdown. An always-on host may run for
+  // months without a clean exit, which is exactly the situation where the only
+  // backup would otherwise be from whenever it last happened to be restarted.
+  backupDatabase('startup');
+  setInterval(() => backupDatabase('daily'), 24 * 60 * 60 * 1000);
 
   // Start the bot from here rather than waiting for the renderer to ask.
   // Deliberately not awaited: a slow or failing license lookup must not delay

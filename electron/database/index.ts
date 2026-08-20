@@ -444,8 +444,69 @@ export function checkpointDatabase(): void {
   }
 }
 
-/** Closes the database cleanly, checkpointing first. */
+/** How many verified backups to keep. */
+const BACKUP_RETENTION = 10;
+
+/**
+ * Writes a verified backup next to the database.
+ *
+ * The corruption-recovery path already knew how to restore from a backup, but
+ * nothing in the app had ever written one — so `backupCandidates` always came
+ * back empty and recovery fell through to "start an empty database". On a
+ * machine nobody is watching, that turns a recoverable fault into total data
+ * loss, silently.
+ *
+ * VACUUM INTO is used rather than a file copy because it produces a fully
+ * checkpointed, defragmented file with no sidecars, and it is safe to run while
+ * the connection is open. The copy is then reopened and checked: an unverified
+ * backup is not a backup, and restoring a corrupt one would be worse than
+ * having none.
+ */
+export function backupDatabase(reason = 'scheduled'): string | null {
+  if (!db || !currentDbPath) return null;
+
+  const backupDir = path.join(path.dirname(currentDbPath), 'backups');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const target = path.join(backupDir, `leadsender.db.backup-${stamp}`);
+
+  try {
+    fs.mkdirSync(backupDir, { recursive: true });
+    db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  } catch (error) {
+    console.error('💾 Backup failed:', error);
+    return null;
+  }
+
+  if (!isSoundDatabaseFile(target)) {
+    console.error('💾 Backup was written but failed verification, discarding:', target);
+    try { fs.unlinkSync(target); } catch { /* nothing to undo */ }
+    return null;
+  }
+
+  console.log(`💾 Backup written (${reason}): ${path.basename(target)}`);
+  pruneBackups(backupDir);
+  return target;
+}
+
+/** Keeps the newest BACKUP_RETENTION backups, oldest deleted first. */
+function pruneBackups(backupDir: string): void {
+  try {
+    const files = fs
+      .readdirSync(backupDir)
+      .filter(n => n.startsWith('leadsender.db.backup-'))
+      .map(n => path.join(backupDir, n))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    for (const stale of files.slice(BACKUP_RETENTION)) {
+      try { fs.unlinkSync(stale); } catch { /* leave it */ }
+    }
+  } catch {
+    // Retention is housekeeping; never let it fail a backup.
+  }
+}
+
+/** Closes the database cleanly, backing up and checkpointing first. */
 export function closeDatabase(): void {
+  backupDatabase('shutdown');
   checkpointDatabase();
   try { db?.close(); } catch { /* already gone */ }
 }
