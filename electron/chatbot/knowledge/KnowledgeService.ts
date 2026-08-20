@@ -225,12 +225,27 @@ function toEntry(row: any): KnowledgeEntry {
  *
  * Returns one array of alternatives per token.
  */
+/**
+ * Function words that carry no retrieval signal.
+ *
+ * Matching is substring-based because Hebrew has no usable word boundary in
+ * JS regexes, and a two-letter word is therefore matched inside longer
+ * unrelated words: "יש" hits inside "אישיות", "מה" inside "מהלך". Scored the
+ * same as a real term, those accidental hits outranked genuine ones — a search
+ * for "מה יש בספטמבר" lost to a row that merely contained the word "אישיות".
+ */
+const STOPWORDS = new Set([
+  'מה', 'מי', 'יש', 'של', 'את', 'זה', 'זו', 'הוא', 'היא', 'אני', 'לי', 'לו',
+  'עם', 'על', 'אל', 'גם', 'רק', 'כי', 'אם', 'או', 'לא', 'כן', 'אז', 'עוד',
+  'איך', 'מתי', 'איפה', 'למה', 'כמה', 'האם', 'צריך', 'רוצה', 'אפשר',
+]);
+
 function tokenize(query: string): string[][] {
-  return (query || '')
-    .toLowerCase()
-    .replace(/["'`״׳,.?!:;()\[\]{}\/\\-]/g, ' ')
+  // Same normalisation as the stored side — sharing one function is what keeps
+  // the two from drifting apart again.
+  return normalizeForMatch(query)
     .split(/\s+/)
-    .filter(w => w.length >= 2)
+    .filter(w => w.length >= 2 && !STOPWORDS.has(w))
     .map(w => {
       // Prefix forms: "הפקודה" -> also try "פקודה".
       const bases = [w];
@@ -249,11 +264,32 @@ function tokenize(query: string): string[][] {
     });
 }
 
+/**
+ * Strips what `tokenize` strips, so both sides of a comparison match.
+ *
+ * The query was normalised and the stored text was not, which meant every
+ * gershayim abbreviation silently failed to match: a search for "סא״לים"
+ * became "סאלים", while the row still read "סא״לים", and
+ * "סא״לים".includes("סאלים") is false. In this domain almost every term is an
+ * abbreviation — קק״צ, דש״ב, בה״ד, סא״ל, מבד״ק — so the effect was broad and
+ * invisible: results still came back, just the wrong ones.
+ */
+function normalizeForMatch(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    // Quote marks are REMOVED, not spaced out. They sit inside Hebrew
+    // abbreviations rather than between words, so replacing them with a space
+    // splits סא״לים into "סא לים" — which then fails to match a user typing
+    // "סאלים". Other punctuation genuinely separates words and becomes a space.
+    .replace(/["'`״׳]/g, '')
+    .replace(/[,.?!:;()\[\]{}\/\\-]/g, ' ');
+}
+
 function score(entry: KnowledgeEntry, terms: string[][]): number {
   if (terms.length === 0) return 1;
-  const title = entry.title.toLowerCase();
-  const body = entry.content.toLowerCase();
-  const meta = JSON.stringify(entry.metadata).toLowerCase();
+  const title = normalizeForMatch(entry.title);
+  const body = normalizeForMatch(entry.content);
+  const meta = normalizeForMatch(JSON.stringify(entry.metadata));
   let total = 0;
   for (const forms of terms) {
     // Best single match per token — alternatives must not stack.
