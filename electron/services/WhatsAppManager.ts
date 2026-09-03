@@ -1445,6 +1445,21 @@ export class WhatsAppManager {
 
         if (state === 'CONNECTED' && bridgeAlive) {
           this.unhealthyCounts.delete(accountId);
+
+          // Write health back to the row, don't just observe it. The status is
+          // only written on event transitions, so an account can sit on
+          // 'connecting' indefinitely while the probe proves it is fine — which
+          // is the same "stuck connecting" display that started all of this,
+          // except now the underlying connection is healthy. A proven-good
+          // probe is better evidence than a transition that never arrived.
+          try {
+            const row = this.db.prepare('SELECT status FROM accounts WHERE id = ?').get(accountId) as any;
+            if (row && row.status !== 'connected') {
+              console.log(`💓 ${accountId} probe healthy but row said '${row.status}' - correcting to connected`);
+              this.updateAccountStatus(accountId, 'connected');
+            }
+          } catch { /* the probe result stands regardless */ }
+
           // Logged on every pass, not just on failure: on an unattended host a
           // silent monitor is indistinguishable from one that died, and this
           // line is the only positive proof the bot can still receive.
