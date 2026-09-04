@@ -98,7 +98,7 @@ export default function Sidebar() {
       <div className="flex h-32 items-center justify-center px-8 border-b border-border/50" style={{ backgroundColor: 'white' }}>
         <img 
           src={logoImage} 
-          alt="LeadSender" 
+          alt="Yachash" 
           className="h-20 w-auto object-contain"
         />
       </div>

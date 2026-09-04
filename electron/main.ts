@@ -22,6 +22,20 @@ if (process.env.VITE_DEV_SERVER_URL) {
   fs.mkdirSync(devUserData, { recursive: true });
   app.setPath('userData', devUserData);
   console.log('🧪 Dev mode - isolated userData:', devUserData);
+} else {
+  // The data directory is PINNED to the original folder name.
+  //
+  // app.getPath('userData') is derived from app.getName(), so renaming the app
+  // to Yachash would silently point it at a brand-new empty %APPDATA%\Yachash:
+  // the database, the WhatsApp session, the knowledge base, the backups and the
+  // licence all live under the old name. The app would come up looking factory
+  // fresh, asking to scan a QR, with every contact and every knowledge entry
+  // apparently gone — while the real data sat untouched one folder away.
+  //
+  // The rename is cosmetic. The data does not move.
+  const dataDir = path.join(app.getPath('appData'), 'leadsender');
+  fs.mkdirSync(dataDir, { recursive: true });
+  app.setPath('userData', dataDir);
 }
 
 // Only one copy of the app may run at a time.
@@ -33,7 +47,7 @@ if (process.env.VITE_DEV_SERVER_URL) {
 // instead of opening a second copy.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
-  console.log('⚠️ LeadSender is already running - focusing the existing window');
+  console.log('⚠️ Yachash is already running - focusing the existing window');
   app.quit();
 } else {
   // Double-clicking the desktop icon while the app is already running (possibly
@@ -47,7 +61,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 // Initialize logger immediately to capture all logs
-console.log('🚀 LeadSender starting...');
+console.log('🚀 Yachash starting...');
 
 // Safety net: whatsapp-web.js internally fires some page.evaluate() calls
 // (e.g. requestPairingCode) outside of the promise chain we await, so a
@@ -123,9 +137,9 @@ function createTray() {
     return;
   }
 
-  tray.setToolTip('LeadSender — הבוט פעיל');
+  tray.setToolTip('Yachash — הבוט פעיל');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'פתיחת LeadSender', click: () => showMainWindow() },
+    { label: 'פתיחת Yachash', click: () => showMainWindow() },
     { type: 'separator' },
     {
       label: 'יציאה (הבוט יפסיק לענות)',
@@ -194,7 +208,7 @@ function createWindow() {
     if (!hasShownTrayHint) {
       hasShownTrayHint = true;
       tray?.displayBalloon?.({
-        title: 'LeadSender ממשיך לרוץ',
+        title: 'Yachash ממשיך לרוץ',
         content: 'הבוט ממשיך לענות להודעות ברקע. לפתיחה — לחיצה כפולה על הסמל בשורת המשימות.',
       });
     }
@@ -374,7 +388,7 @@ app.whenReady().then(async () => {
 // reaching here means it was genuinely torn down — and the bot should still be
 // answering WhatsApp. The tray's Quit is the only way out.
 app.on('window-all-closed', () => {
-  console.log('🪟 Window closed - LeadSender keeps running in the tray');
+  console.log('🪟 Window closed - Yachash keeps running in the tray');
 });
 
 // Save state before quitting (campaigns and warmup will auto-resume on next start)

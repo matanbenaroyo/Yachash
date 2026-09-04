@@ -27,7 +27,7 @@ export default function InitializationLoader({ onComplete }: InitializationLoade
 
   // Translations
   const labels = {
-    title: language === 'he' ? 'מתחיל את LeadSender' : language === 'ar' ? 'بدء تشغيل LeadSender' : 'Starting LeadSender',
+    title: language === 'he' ? 'מתחיל את Yachash' : language === 'ar' ? 'بدء تشغيل Yachash' : 'Starting Yachash',
     subtitle: language === 'he' ? 'מחבר את חשבונות הווטסאפ שלך...' : language === 'ar' ? 'جارٍ توصيل حسابات واتساب...' : 'Connecting your WhatsApp accounts...',
     noAccounts: language === 'he' ? 'טוען את האפליקציה...' : language === 'ar' ? 'جارٍ تحميل التطبيق...' : 'Loading application...',
     accountsProgress: language === 'he' ? 'חשבונות חוברו' : language === 'ar' ? 'الحسابات المتصلة' : 'Accounts connected',
@@ -93,7 +93,7 @@ export default function InitializationLoader({ onComplete }: InitializationLoade
         {/* Logo */}
         <div className="mb-8 flex justify-center">
           <div className="bg-white rounded-2xl p-6 shadow-lg">
-            <img src={logoImage} alt="LeadSender" className="h-16 w-auto object-contain" />
+            <img src={logoImage} alt="Yachash" className="h-16 w-auto object-contain" />
           </div>
         </div>
 

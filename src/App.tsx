@@ -212,7 +212,7 @@ function App() {
             </div>
             <h1 className="text-2xl font-bold mb-2">License Required</h1>
             <p className="text-muted-foreground mb-6">
-              Please activate your license to use LeadSender
+              Please activate your license to use Yachash
             </p>
             <p className="text-xs text-muted-foreground">
               Enter your license key in the dialog above

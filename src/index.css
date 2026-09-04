@@ -3,49 +3,63 @@
 @tailwind utilities;
 
 @layer base {
+  /*
+   * מערך היח״ש brand palette.
+   *
+   * Taken from the unit emblem and the bot mascot: a deep burgundy ground with
+   * a soft pink glow and cream lettering. Hue 337 carries the burgundy, 333 the
+   * pink; every surface is tinted toward it rather than left neutral grey, so
+   * the app reads as the brand instead of as a themed default.
+   *
+   * Status colours (green for connected, red for failures) are deliberately NOT
+   * part of this palette and stay in the components — recolouring them to brand
+   * pink would make success and failure indistinguishable at a glance.
+   */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 340 33% 99%;
+    --foreground: 337 55% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 337 55% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 153 45% 48%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --popover-foreground: 337 55% 12%;
+    --primary: 337 60% 42%;
+    --primary-foreground: 340 60% 98%;
+    --secondary: 337 30% 96%;
+    --secondary-foreground: 337 50% 18%;
+    --muted: 337 25% 96%;
+    --muted-foreground: 337 12% 45%;
+    --accent: 333 60% 94%;
+    --accent-foreground: 337 50% 18%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 153 45% 48%;
+    --border: 337 20% 90%;
+    --input: 337 20% 90%;
+    --ring: 337 60% 42%;
     --radius: 0.5rem;
   }
 
+  /* Dark mode is the brand's own look: the burgundy ground the emblem sits on,
+     with the mascot's pink as the accent and cream for text. */
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 153 45% 55%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --background: 337 62% 9%;
+    --foreground: 40 35% 93%;
+    --card: 337 55% 12%;
+    --card-foreground: 40 35% 93%;
+    --popover: 337 55% 12%;
+    --popover-foreground: 40 35% 93%;
+    --primary: 333 70% 72%;
+    --primary-foreground: 337 62% 10%;
+    --secondary: 337 40% 18%;
+    --secondary-foreground: 40 35% 93%;
+    --muted: 337 35% 18%;
+    --muted-foreground: 337 15% 65%;
+    --accent: 337 45% 22%;
+    --accent-foreground: 40 35% 93%;
+    --destructive: 0 62.8% 45%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 153 45% 55%;
+    --border: 337 32% 22%;
+    --input: 337 32% 22%;
+    --ring: 333 70% 72%;
   }
 }
 

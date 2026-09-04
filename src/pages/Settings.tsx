@@ -621,7 +621,7 @@ export default function Settings() {
               
               <div className="mt-6 text-center">
                 <p className="text-xs text-muted-foreground/50">
-                  © 2026 LeadSender. All rights reserved.
+                  © 2026 Yachash. All rights reserved.
                 </p>
               </div>
             </CardContent>

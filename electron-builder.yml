@@ -1,5 +1,5 @@
 appId: com.leadsender.app
-productName: LeadSender
+productName: Yachash
 directories:
   output: release
   buildResources: build
@@ -15,7 +15,7 @@ win:
     - nsis
   icon: build/icon.ico
   artifactName: ${productName}-Setup-${version}.${ext}
-  publisherName: LeadSender
+  publisherName: Yachash
   verifyUpdateCodeSignature: false
 nsis:
   oneClick: false
@@ -23,7 +23,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: LeadSender
+  shortcutName: Yachash
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   deleteAppDataOnUninstall: false

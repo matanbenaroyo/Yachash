@@ -71,9 +71,9 @@ export default function LicenseDialog({ open, onLicenseActivated }: LicenseDialo
               <Key className="h-8 w-8 text-primary" />
             </div>
           </div>
-          <DialogTitle className="text-center text-2xl">Activate LeadSender</DialogTitle>
+          <DialogTitle className="text-center text-2xl">Activate Yachash</DialogTitle>
           <DialogDescription className="text-center">
-            Enter your license key to start using LeadSender
+            Enter your license key to start using Yachash
           </DialogDescription>
         </DialogHeader>
 
@@ -98,7 +98,7 @@ export default function LicenseDialog({ open, onLicenseActivated }: LicenseDialo
               autoFocus
             />
             <p className="text-xs text-muted-foreground">
-              Enter your license key to activate LeadSender
+              Enter your license key to activate Yachash
             </p>
           </div>
 
@@ -131,7 +131,7 @@ export default function LicenseDialog({ open, onLicenseActivated }: LicenseDialo
                 window.open('https://your-website.com/purchase', '_blank');
               }}
             >
-              Purchase LeadSender
+              Purchase Yachash
             </Button>
           </div>
         </div>
