@@ -15,7 +15,10 @@ import {
   renderVehicleEntryForm,
 } from '../workflows/vehicleEntryFormat';
 import { buildRankMenu, resolveRankRouting } from '../seniorStaff';
-import { toLocalIsraeliPhone } from '../phone';
+import { toLocalIsraeliPhone, toWhatsAppNumber, digitsOnly as digitsOnlyPhone } from '../phone';
+import path from 'path';
+import fs from 'fs';
+import { app } from 'electron';
 import {
   FYI_FORMAT,
   findSender,
@@ -403,6 +406,200 @@ const getSeniorStaffOptions: ChatbotTool = {
   }),
 };
 
+/** Media attached by this sender is only relayable while it is still fresh. */
+const RELAY_MEDIA_WINDOW_MS = 60 * 60 * 1000;
+
+/** Counts messages in this conversation — used as the turn number. */
+function conversationTurn(ctx: WorkflowContext): number {
+  try {
+    const row = ctx.db
+      .prepare('SELECT COUNT(*) n FROM chatbot_messages WHERE conversation_id = ?')
+      .get(ctx.conversation.id) as { n: number };
+    return row?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** The most recent image this person sent, if it is recent enough to mean "this". */
+function recentMediaFrom(ctx: WorkflowContext): { filename: string; mimetype: string } | null {
+  try {
+    const row = ctx.db
+      .prepare(
+        `SELECT media_filename, media_mimetype, timestamp
+         FROM messages
+         WHERE from_number = ? AND media_filename IS NOT NULL AND is_from_me = 0
+         ORDER BY timestamp DESC LIMIT 1`,
+      )
+      .get(ctx.phoneNumber) as any;
+    if (!row?.media_filename) return null;
+
+    const sentAt = new Date(row.timestamp).getTime();
+    if (Number.isFinite(sentAt) && Date.now() - sentAt > RELAY_MEDIA_WINDOW_MS) return null;
+
+    return { filename: row.media_filename, mimetype: row.media_mimetype ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+const prepareRelay: ChatbotTool = {
+  name: 'prepareRelay',
+  description:
+    'Step 1 of passing a message on to someone else, for authorised staff only. Validates the ' +
+    'destination and returns a preview to read back to the requester WORD FOR WORD. It does NOT send. ' +
+    'Use when an authorised member asks you to write to a specific number ("תכתוב ל-050... ש..."), ' +
+    'or attaches an image and says who to send it to. Set includeImage when they mean an image they ' +
+    'just sent. After showing the preview you must WAIT for them to confirm in a new message.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      targetNumber: { type: 'string', description: 'Destination, exactly as they wrote it (e.g. "0505556699")' },
+      messageText: { type: 'string', description: 'The message to send, verbatim as they dictated it' },
+      includeImage: { type: 'boolean', description: 'True when relaying an image they just attached' },
+    },
+    required: ['targetNumber', 'messageText'],
+  },
+  execute: (input, ctx) => {
+    // Authorisation is code-side and never a prompt decision: this tool sends
+    // messages to arbitrary numbers under the unit's name.
+    const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
+    if (!sender) {
+      return { ok: false, error: 'המספר הזה אינו מורשה לבקש שליחת הודעות. לא נשלח דבר.' };
+    }
+
+    const target = toWhatsAppNumber(input.targetNumber);
+    if (!target) {
+      return {
+        ok: false,
+        error: `לא הצלחתי לזהות את המספר "${input.targetNumber}". בקשי מספר מלא, למשל 0501234567.`,
+      };
+    }
+    if (target === digitsOnlyPhone(ctx.phoneNumber)) {
+      return { ok: false, error: 'המספר שצוין הוא המספר שלך. ודאי לאיזה מספר להעביר.' };
+    }
+
+    const body = String(input.messageText ?? '').trim();
+    const wantsImage = input.includeImage === true;
+    const media = wantsImage ? recentMediaFrom(ctx) : null;
+
+    if (!body && !media) {
+      return { ok: false, error: 'אין תוכן לשליחה. בקשי את נוסח ההודעה.' };
+    }
+    if (wantsImage && !media) {
+      return {
+        ok: false,
+        error: 'לא מצאתי תמונה שנשלחה לאחרונה. בקשי לשלוח את התמונה שוב ואז לחזור על הבקשה.',
+      };
+    }
+
+    const id = randomUUID();
+    // Anything still pending from this requester is stale the moment a new one
+    // is prepared — otherwise a confirmation could land on the wrong message.
+    ctx.db
+      .prepare(`UPDATE chatbot_relays SET status = 'superseded' WHERE requester_phone = ? AND status = 'pending'`)
+      .run(ctx.phoneNumber);
+
+    ctx.db
+      .prepare(
+        `INSERT INTO chatbot_relays
+           (id, conversation_id, requester_phone, requester_name, target_phone, target_raw, body, media_filename, status, prepared_turn)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(
+        id,
+        ctx.conversation.id,
+        ctx.phoneNumber,
+        sender.name,
+        target,
+        String(input.targetNumber ?? ''),
+        body,
+        media?.filename ?? null,
+        conversationTurn(ctx),
+      );
+
+    return {
+      ok: true,
+      data: {
+        target: toLocalIsraeliPhone(target),
+        body,
+        withImage: Boolean(media),
+        note:
+          'לא נשלח עדיין. הציגי לה בדיוק למי ומה עומד להישלח, ובקשי אישור. ' +
+          'רק אחרי שהיא מאשרת בהודעה נפרדת — קראי ל-confirmRelay.',
+      },
+    };
+  },
+};
+
+const confirmRelay: ChatbotTool = {
+  name: 'confirmRelay',
+  description:
+    'Step 2: actually sends the message prepared by prepareRelay, after the requester confirmed. ' +
+    'Call this ONLY when they have replied approving it. Returns ok:false if nothing is pending or ' +
+    'if the confirmation did not arrive in a separate message.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: async (input, ctx) => {
+    const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
+    if (!sender) return { ok: false, error: 'המספר הזה אינו מורשה. לא נשלח דבר.' };
+
+    const pending = ctx.db
+      .prepare(
+        `SELECT * FROM chatbot_relays
+         WHERE requester_phone = ? AND status = 'pending'
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(ctx.phoneNumber) as any;
+
+    if (!pending) {
+      return { ok: false, error: 'אין הודעה שממתינה לאישור. התחילי מחדש.' };
+    }
+
+    // The confirmation must arrive in a LATER turn than the preview. This is
+    // what makes the confirmation real: without it the model could prepare and
+    // confirm in the same breath, and nobody would ever have seen the preview.
+    if (conversationTurn(ctx) <= Number(pending.prepared_turn ?? 0)) {
+      return {
+        ok: false,
+        error: 'ההודעה עוד לא הוצגה לאישור. הציגי אותה קודם ובקשי אישור בהודעה נפרדת.',
+      };
+    }
+
+    const mediaPath = pending.media_filename
+      ? path.join(app.getPath('userData'), 'media', String(pending.media_filename))
+      : null;
+
+    if (mediaPath && !fs.existsSync(mediaPath)) {
+      ctx.db.prepare(`UPDATE chatbot_relays SET status='failed', error=? WHERE id=?`)
+        .run('media file missing', pending.id);
+      return { ok: false, error: 'קובץ התמונה לא נמצא יותר. בקשי לשלוח אותה שוב.' };
+    }
+
+    try {
+      if (mediaPath) {
+        await ctx.sendWhatsAppMedia(pending.target_phone, mediaPath, pending.body || undefined);
+      } else {
+        await ctx.sendWhatsApp(pending.target_phone, pending.body);
+      }
+      ctx.db
+        .prepare(`UPDATE chatbot_relays SET status='sent', confirmed_at=CURRENT_TIMESTAMP, sent_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .run(pending.id);
+      return {
+        ok: true,
+        data: { deliveredTo: toLocalIsraeliPhone(pending.target_phone), withImage: Boolean(mediaPath) },
+      };
+    } catch (e: any) {
+      const message = String(e?.message ?? e);
+      ctx.db.prepare(`UPDATE chatbot_relays SET status='failed', error=? WHERE id=?`).run(message, pending.id);
+      // "not registered" is the common, actionable case: a mistyped number.
+      const friendly = /not registered/i.test(message)
+        ? `המספר ${toLocalIsraeliPhone(pending.target_phone)} לא רשום בוואטסאפ. ודאי את המספר.`
+        : `השליחה נכשלה: ${message}`;
+      return { ok: false, error: friendly };
+    }
+  },
+};
+
 /** A resolved escalation destination, or the reason one could not be resolved. */
 type RankDestination =
   | { ok: true; phone: string; name: string; category: string; rank: string | null }
@@ -691,6 +888,8 @@ export const TOOLS: ChatbotTool[] = [
   saveContactDetails,
   getFyiFormat,
   broadcastFyi,
+  prepareRelay,
+  confirmRelay,
   getVehicleEntryFormat,
   searchGeneralKnowledge,
   searchOrders,

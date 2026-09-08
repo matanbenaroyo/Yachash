@@ -16,6 +16,7 @@ export type ChatbotIntent =
   | 'GENERAL_QUESTION'
   | 'SENIOR_STAFF'
   | 'FYI_BROADCAST'
+  | 'MESSAGE_RELAY'
   | 'OTHER'
   | 'UNKNOWN';
 
@@ -28,6 +29,7 @@ export const CHATBOT_INTENTS: ChatbotIntent[] = [
   'GENERAL_QUESTION',
   'SENIOR_STAFF',
   'FYI_BROADCAST',
+  'MESSAGE_RELAY',
   'OTHER',
   'UNKNOWN',
 ];
@@ -102,6 +104,8 @@ export interface WorkflowContext {
   db: any;
   /** Sends a WhatsApp message via the existing WhatsAppManager. */
   sendWhatsApp: (to: string, message: string) => Promise<void>;
+  /** Sends a file from disk, for relaying an image the requester attached. */
+  sendWhatsAppMedia: (to: string, filePath: string, caption?: string) => Promise<void>;
   /** Resolved "today" for relative-date parsing, injected for testability. */
   now: Date;
 }

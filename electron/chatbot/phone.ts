@@ -44,3 +44,52 @@ export function toLocalIsraeliPhone(input: unknown): string {
 
   return raw;
 }
+
+/**
+ * International form for SENDING: 0505556699 -> 972505556699.
+ *
+ * The inverse of the display helper above. WhatsAppManager.normalizeSendTarget
+ * rejects anything without a country code, so a number typed the way an
+ * Israeli actually writes it has to be converted before it can be used as a
+ * destination.
+ *
+ * Returns null when the input is not a number this can convert with
+ * confidence. That matters more than convenience here: the value is used as a
+ * message destination, and guessing wrong means sending someone else's message
+ * to a stranger. An unrecognised format should stop the send, not approximate.
+ */
+export function toWhatsAppNumber(input: unknown): string | null {
+  const raw = String(input ?? '').trim();
+  if (!raw) return null;
+
+  // Group ids are already addressable as-is.
+  if (raw.endsWith('@g.us')) return raw;
+
+  const digits = digitsOnly(raw);
+  if (!digits) return null;
+
+  // 00972... / 972...
+  const withoutIdd = digits.startsWith('00') ? digits.slice(2) : digits;
+
+  // Already international: 972 + 9 subscriber digits.
+  if (withoutIdd.startsWith('972')) {
+    const rest = withoutIdd.slice(3).replace(/^0/, ''); // tolerate 9720xx
+    return rest.length === 9 ? '972' + rest : null;
+  }
+
+  // Local trunk form: 0 + 9 digits, e.g. 0505556699.
+  if (withoutIdd.length === 10 && withoutIdd.startsWith('0')) {
+    return '972' + withoutIdd.slice(1);
+  }
+
+  // Bare subscriber number: 505556699.
+  if (withoutIdd.length === 9 && withoutIdd.startsWith('5')) {
+    return '972' + withoutIdd;
+  }
+
+  // A non-Israeli number that already carries some country code is passed
+  // through; WhatsApp itself will reject it if it is not real.
+  if (withoutIdd.length >= 11 && withoutIdd.length <= 15) return withoutIdd;
+
+  return null;
+}

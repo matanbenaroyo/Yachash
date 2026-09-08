@@ -1006,6 +1006,37 @@ export async function initDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Messages an authorised member asked the bot to pass on to someone else.
+    --
+    -- Every row is a message sent to a real person under the unit's name, on
+    -- someone's behalf, so this is an audit log rather than a work queue: who
+    -- asked, what they asked to send, where it went and whether it arrived.
+    -- Rows are kept after delivery.
+    --
+    -- The two-step flow lives here too. A relay is written 'pending' when it is
+    -- prepared and only sent once confirmed, which is what makes the
+    -- confirmation real instead of something the model can skip.
+    CREATE TABLE IF NOT EXISTS chatbot_relays (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      requester_phone TEXT NOT NULL,
+      requester_name TEXT,
+      target_phone TEXT NOT NULL,
+      target_raw TEXT,
+      body TEXT,
+      media_filename TEXT,
+      status TEXT DEFAULT 'pending',
+      error TEXT,
+      -- The turn the relay was prepared on. Confirming requires a LATER turn,
+      -- so the requester must actually reply before anything is sent.
+      prepared_turn INTEGER,
+      confirmed_at DATETIME,
+      sent_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_chatbot_relays_requester ON chatbot_relays(requester_phone);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_relays_status ON chatbot_relays(status);
+
     -- People who contacted the bot. Collected once, then reused so the bot
     -- never re-asks someone who already identified themselves.
     CREATE TABLE IF NOT EXISTS chatbot_known_contacts (

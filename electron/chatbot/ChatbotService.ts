@@ -244,6 +244,15 @@ export class ChatbotService {
         }
         await this.sendWhatsApp(accountId, to, message);
       },
+      sendWhatsAppMedia: async (to, filePath, caption) => {
+        if (!deliver) {
+          outbound.push({ to, message: `[media] ${filePath}${caption ? ` — ${caption}` : ''}` });
+          console.log(`🧪 [simulation] suppressed media send to ${to}`);
+          return;
+        }
+        if (!this.whatsappManager) throw new Error('WhatsApp manager not available');
+        await this.whatsappManager.sendMedia(accountId, to, filePath, caption);
+      },
       now,
     };
 

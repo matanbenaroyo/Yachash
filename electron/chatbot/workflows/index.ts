@@ -112,6 +112,32 @@ const fyiBroadcast: WorkflowDefinition = {
   tools: ['getFyiFormat', 'broadcastFyi', 'escalateToStaff'],
 };
 
+const messageRelay: WorkflowDefinition = {
+  id: 'message_relay',
+  intent: 'MESSAGE_RELAY',
+  label: 'העברת הודעה למספר',
+  instructions: `מישהי מהסגל מבקשת שתעבירי הודעה למספר מסוים.
+ההרשאה נבדקת בכלים, לא על ידך — אל תחליטי בעצמך מי מורשה.
+
+שלב 1 — קראי ל-prepareRelay עם:
+• targetNumber — המספר בדיוק כפי שהיא כתבה אותו.
+• messageText — נוסח ההודעה **מילה במילה** כפי שהיא הכתיבה. אל תערכי, אל תשפרי, אל תוסיפי ברכה.
+• includeImage — true רק אם היא צירפה תמונה והתכוונה שתעבירי אותה.
+
+שלב 2 — הצגת אישור. **הכלי לא שולח.**
+הציגי לה בדיוק:
+  • למי — המספר שחזר מהכלי
+  • ומה — נוסח ההודעה המלא
+ואז שאלי אם לשלוח.
+
+שלב 3 — רק אחרי שהיא אישרה **בהודעה נפרדת** — קראי ל-confirmRelay.
+אם היא מתקנת משהו — התחילי מחדש מ-prepareRelay, אל תאשרי את הישן.
+אם היא אומרת לא — אל תשלחי, ואשרי לה שבוטל.
+
+לעולם אל תאמרי שההודעה נשלחה לפני ש-confirmRelay החזיר הצלחה.`,
+  tools: ['prepareRelay', 'confirmRelay'],
+};
+
 const seniorStaff: WorkflowDefinition = {
   id: 'senior_staff',
   intent: 'SENIOR_STAFF',
@@ -173,6 +199,7 @@ export const WORKFLOWS: WorkflowDefinition[] = [
   generalQuestion,
   seniorStaff,
   fyiBroadcast,
+  messageRelay,
   other,
 ];
 
