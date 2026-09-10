@@ -15,7 +15,7 @@ import {
   renderVehicleEntryForm,
 } from '../workflows/vehicleEntryFormat';
 import { buildRankMenu, resolveRankRouting } from '../seniorStaff';
-import { toLocalIsraeliPhone, toWhatsAppNumber, digitsOnly as digitsOnlyPhone } from '../phone';
+import { toLocalIsraeliPhone, toWhatsAppNumber, extractPhoneNumbers, digitsOnly as digitsOnlyPhone } from '../phone';
 import path from 'path';
 import fs from 'fs';
 import { app } from 'electron';
@@ -600,6 +600,146 @@ const confirmRelay: ChatbotTool = {
   },
 };
 
+/**
+ * Upper bound on one group creation.
+ *
+ * Not a technical limit — WhatsApp allows far more. Mass-adding strangers is
+ * among the most reliable ways to get a number banned, and this is the unit's
+ * only number: losing it takes the whole bot down. A cap keeps an honest
+ * mistake (a pasted list of the wrong thing) from becoming that.
+ */
+const MAX_GROUP_PARTICIPANTS = 50;
+
+const prepareGroupCreation: ChatbotTool = {
+  name: 'prepareGroupCreation',
+  description:
+    'Step 1 of creating a WhatsApp group from a list of numbers, for authorised staff only. ' +
+    'Parses the numbers, validates them and returns a preview. It does NOT create anything. ' +
+    'Pass the numbers text exactly as the requester sent it — do not retype or reformat the list. ' +
+    'After showing the preview you must WAIT for confirmation in a new message.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      groupName: { type: 'string', description: 'The name for the new group, as they gave it' },
+      numbersText: { type: 'string', description: 'The list of numbers, verbatim as they sent it' },
+    },
+    required: ['groupName', 'numbersText'],
+  },
+  execute: (input, ctx) => {
+    const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
+    if (!sender) {
+      return { ok: false, error: 'המספר הזה אינו מורשה ליצור קבוצות. לא נוצר דבר.' };
+    }
+
+    const groupName = String(input.groupName ?? '').trim();
+    if (!groupName) return { ok: false, error: 'לא צוין שם לקבוצה. בקשי שם.' };
+
+    const { numbers, unrecognised } = extractPhoneNumbers(String(input.numbersText ?? ''));
+
+    if (!numbers.length) {
+      return { ok: false, error: 'לא זיהיתי אף מספר תקין ברשימה. בקשי לשלוח את המספרים שוב.' };
+    }
+    if (numbers.length > MAX_GROUP_PARTICIPANTS) {
+      return {
+        ok: false,
+        error: `הרשימה מכילה ${numbers.length} מספרים, והמקסימום לפעולה אחת הוא ${MAX_GROUP_PARTICIPANTS}. ` +
+          'אפשר לפצל לכמה קבוצות או להוסיף את השאר ידנית.',
+      };
+    }
+
+    const id = randomUUID();
+    ctx.db
+      .prepare(`UPDATE chatbot_group_creations SET status='superseded' WHERE requester_phone=? AND status='pending'`)
+      .run(ctx.phoneNumber);
+    ctx.db
+      .prepare(
+        `INSERT INTO chatbot_group_creations
+           (id, conversation_id, requester_phone, requester_name, group_name, numbers, status, prepared_turn)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(id, ctx.conversation.id, ctx.phoneNumber, sender.name, groupName, JSON.stringify(numbers), conversationTurn(ctx));
+
+    return {
+      ok: true,
+      data: {
+        groupName,
+        count: numbers.length,
+        numbers: numbers.map(toLocalIsraeliPhone),
+        unrecognised: unrecognised.length ? unrecognised : undefined,
+        note:
+          'הקבוצה עדיין לא נוצרה. הציגי את שם הקבוצה, כמה מספרים זוהו, ואם יש שורות שלא זוהו — ' +
+          'הציגי אותן במפורש ואל תתעלמי מהן. ואז בקשי אישור. רק אחרי אישור בהודעה נפרדת — confirmGroupCreation.',
+      },
+    };
+  },
+};
+
+const confirmGroupCreation: ChatbotTool = {
+  name: 'confirmGroupCreation',
+  description:
+    'Step 2: actually creates the group prepared by prepareGroupCreation, after the requester ' +
+    'confirmed in a separate message. Reports per-number outcomes — added, invited only, or not on ' +
+    'WhatsApp. Report those honestly; "invited" is NOT the same as joined.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: async (_input, ctx) => {
+    const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
+    if (!sender) return { ok: false, error: 'המספר הזה אינו מורשה. לא נוצר דבר.' };
+
+    const pending = ctx.db
+      .prepare(
+        `SELECT * FROM chatbot_group_creations
+         WHERE requester_phone = ? AND status = 'pending'
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(ctx.phoneNumber) as any;
+
+    if (!pending) return { ok: false, error: 'אין קבוצה שממתינה לאישור. התחילי מחדש.' };
+
+    if (conversationTurn(ctx) <= Number(pending.prepared_turn ?? 0)) {
+      return { ok: false, error: 'הפרטים עוד לא הוצגו לאישור. הציגי אותם ובקשי אישור בהודעה נפרדת.' };
+    }
+
+    let numbers: string[] = [];
+    try { numbers = JSON.parse(pending.numbers ?? '[]'); } catch { numbers = []; }
+    if (!numbers.length) return { ok: false, error: 'רשימת המספרים ריקה. התחילי מחדש.' };
+
+    const result = await ctx.createWhatsAppGroup(pending.group_name, numbers);
+
+    if (!result.ok) {
+      ctx.db.prepare(`UPDATE chatbot_group_creations SET status='failed', error=? WHERE id=?`)
+        .run(result.error ?? 'unknown', pending.id);
+      return { ok: false, error: `יצירת הקבוצה נכשלה: ${result.error ?? 'שגיאה לא ידועה'}` };
+    }
+
+    ctx.db
+      .prepare(
+        `UPDATE chatbot_group_creations
+         SET status='created', group_id=?, results=?, created_group_at=CURRENT_TIMESTAMP
+         WHERE id=?`,
+      )
+      .run(result.groupId ?? null, JSON.stringify(result.results), pending.id);
+
+    const added = result.results.filter(r => r.outcome === 'added').map(r => toLocalIsraeliPhone(r.phone));
+    const invited = result.results.filter(r => r.outcome === 'invited').map(r => toLocalIsraeliPhone(r.phone));
+    const notOnWhatsApp = result.results.filter(r => r.outcome === 'not_registered').map(r => toLocalIsraeliPhone(r.phone));
+    const failed = result.results.filter(r => r.outcome === 'failed').map(r => toLocalIsraeliPhone(r.phone));
+
+    return {
+      ok: true,
+      data: {
+        groupName: pending.group_name,
+        added,
+        invitedOnly: invited,
+        notOnWhatsApp,
+        failed,
+        note:
+          'דווחי בכנות: "הוזמנו בלבד" זה לא "נוספו" — אנשים עם הגבלת פרטיות קיבלו הזמנה וצריכים ' +
+          'ללחוץ עליה בעצמם. ציני כמה נוספו בפועל, ומי לא, ולמה.',
+      },
+    };
+  },
+};
+
 /** A resolved escalation destination, or the reason one could not be resolved. */
 type RankDestination =
   | { ok: true; phone: string; name: string; category: string; rank: string | null }
@@ -890,6 +1030,8 @@ export const TOOLS: ChatbotTool[] = [
   broadcastFyi,
   prepareRelay,
   confirmRelay,
+  prepareGroupCreation,
+  confirmGroupCreation,
   getVehicleEntryFormat,
   searchGeneralKnowledge,
   searchOrders,

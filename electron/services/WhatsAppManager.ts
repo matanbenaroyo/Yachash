@@ -719,6 +719,20 @@ export class WhatsAppManager {
           const ready = await this.waitForAccountReady(account.id, STARTUP_READY_TIMEOUT_MS);
           if (ready) {
             this.initProgress.completed++;
+          } else if (await this.probeAccountHealthy(account.id)) {
+            // The 'ready' event is not the only evidence, and it is not the
+            // best one. It can simply fail to arrive — the page loads, the
+            // socket connects and messages flow, but the event never fires, so
+            // this wait times out on a connection that is demonstrably working.
+            //
+            // Tearing it down here would destroy a live client and, worse,
+            // overwrite the health monitor's verified result with 'disconnected'
+            // moments after it proved the message bridge alive. A probe that
+            // round-trips into the page outranks an event that never came.
+            console.log(`✅ Account ${account.id.substring(0, 8)} never fired 'ready' but probes healthy - keeping it`);
+            this.readyAccounts.add(account.id);
+            this.updateAccountStatus(account.id, 'connected');
+            this.initProgress.completed++;
           } else {
             console.warn(`⚠️ Account ${account.id.substring(0, 8)} did not become ready within ${STARTUP_READY_TIMEOUT_MS / 1000}s - marking as disconnected`);
             // Explicitly mark as disconnected so the UI reflects the real state
@@ -1399,6 +1413,41 @@ export class WhatsAppManager {
   stopHealthMonitor(): void {
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.healthTimer = null;
+  }
+
+  /**
+   * True when this account's socket is connected AND its message bridge is
+   * still injected — the same test the health monitor applies.
+   *
+   * Shared deliberately: startup readiness and ongoing health should not be
+   * able to disagree about whether an account works. When they did, the older
+   * check overwrote the newer, better-evidenced one.
+   */
+  private async probeAccountHealthy(accountId: string): Promise<boolean> {
+    const client = this.clients.get(accountId);
+    if (!client) return false;
+
+    try {
+      const state = await rejectIfSilent(
+        (client as any).getState(),
+        () => false,
+        HEALTH_PROBE_TIMEOUT_MS,
+        `State probe for ${accountId}`,
+      );
+      if (state !== 'CONNECTED') return false;
+
+      return await rejectIfSilent(
+        (client as any).pupPage.evaluate(
+          () => typeof (window as any).WWebJS !== 'undefined'
+            && typeof (window as any).onAddMessageEvent === 'function',
+        ),
+        () => false,
+        HEALTH_PROBE_TIMEOUT_MS,
+        `Bridge probe for ${accountId}`,
+      );
+    } catch {
+      return false;
+    }
   }
 
   private async runHealthCheck(): Promise<void> {
@@ -2884,6 +2933,70 @@ export class WhatsAppManager {
       participantId,
       options
     );
+  }
+
+  /**
+   * Creates a group and reports what happened to each number individually.
+   *
+   * whatsapp-web.js returns a per-participant status, and the distinctions
+   * matter enough that they must not be flattened into "done": 200 means added,
+   * 403 means their privacy settings forbid being added and an invite was sent
+   * instead, 404 means the number is not on WhatsApp at all. Someone who was
+   * merely invited has NOT joined, and reporting them as added would leave the
+   * requester believing a group is complete when people are missing from it.
+   */
+  async createGroupWithParticipants(
+    accountId: string,
+    title: string,
+    phoneNumbers: string[],
+  ): Promise<{
+    ok: boolean;
+    groupId?: string;
+    error?: string;
+    results: Array<{ phone: string; outcome: 'added' | 'invited' | 'not_registered' | 'failed'; message: string }>;
+  }> {
+    const client = this.clients.get(accountId);
+    if (!client) return { ok: false, error: 'Account not connected', results: [] };
+    if (!this.readyAccounts.has(accountId)) {
+      return { ok: false, error: 'Account is not ready yet', results: [] };
+    }
+
+    const wids = phoneNumbers.map(p => `${String(p).replace(/\D/g, '')}@c.us`);
+
+    let raw: any;
+    try {
+      raw = await (client as any).createGroup(title, wids, { autoSendInviteV4: true });
+    } catch (error: any) {
+      return { ok: false, error: String(error?.message ?? error), results: [] };
+    }
+
+    // The library signals failure by returning a plain string rather than throwing.
+    if (typeof raw === 'string') {
+      return { ok: false, error: raw, results: [] };
+    }
+
+    const results: Array<{ phone: string; outcome: 'added' | 'invited' | 'not_registered' | 'failed'; message: string }> = [];
+    const participants = raw?.participants ?? {};
+
+    for (const [participantId, info] of Object.entries<any>(participants)) {
+      const phone = String(participantId).split('@')[0];
+      // The creator is us; not something the requester asked to add.
+      if (info?.isGroupCreator) continue;
+
+      const code = Number(info?.statusCode ?? 0);
+      const outcome =
+        code === 200 ? 'added'
+          : code === 403 ? (info?.isInviteV4Sent ? 'invited' : 'failed')
+            : code === 404 ? 'not_registered'
+              : 'failed';
+
+      results.push({ phone, outcome, message: String(info?.message ?? '') });
+    }
+
+    const groupId = raw?.gid?._serialized ?? (typeof raw?.gid === 'string' ? raw.gid : undefined);
+    console.log(`👥 Created group "${title}" (${groupId}) - ${results.filter(r => r.outcome === 'added').length}/${results.length} added`);
+
+    return { ok: true, groupId, results };
   }
 
   async addParticipantToGroup(accountId: string, groupId: string, phoneNumber: string): Promise<GroupAddParticipantResult> {

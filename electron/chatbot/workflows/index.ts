@@ -138,6 +138,36 @@ const messageRelay: WorkflowDefinition = {
   tools: ['prepareRelay', 'confirmRelay'],
 };
 
+const groupCreation: WorkflowDefinition = {
+  id: 'group_creation',
+  intent: 'GROUP_CREATION',
+  label: 'פתיחת קבוצת וואטסאפ',
+  instructions: `מישהי מהסגל מבקשת לפתוח קבוצת וואטסאפ חדשה ולהוסיף אליה רשימת מספרים.
+ההרשאה נבדקת בכלים, לא על ידך.
+
+שלב 1 — ודאי שיש לך שני דברים: **שם לקבוצה** ו**רשימת מספרים**.
+אם חסר אחד מהם — בקשי אותו. אל תמציאי שם ואל תשלימי מספרים בעצמך.
+
+שלב 2 — קראי ל-prepareGroupCreation עם:
+• groupName — השם כפי שהיא נתנה.
+• numbersText — הרשימה **בדיוק כפי שהיא שלחה**. אל תתקני, אל תסדרי מחדש ואל תקלידי מחדש את המספרים —
+  הכלי מחלץ אותם בעצמו, וכל הקלדה מחדש היא הזדמנות לטעות במספר.
+
+שלב 3 — הצגת אישור. **הכלי לא יוצר כלום.**
+הציגי: שם הקבוצה, כמה מספרים זוהו, ואם הכלי החזיר שורות שלא זוהו — **הציגי אותן במפורש**.
+שורה שלא זוהתה היא אדם שלא ייכנס לקבוצה, ואם לא תגידי — אף אחד לא ישים לב.
+ואז בקשי אישור.
+
+שלב 4 — רק אחרי אישור **בהודעה נפרדת** — קראי ל-confirmGroupCreation.
+
+שלב 5 — דיווח כן. הכלי מחזיר שלוש קבוצות תוצאה שונות:
+• נוספו — נכנסו לקבוצה בפועל.
+• הוזמנו בלבד — הגדרות הפרטיות שלהן לא מאפשרות הוספה, אז נשלחה להן הזמנה. **הן עדיין לא בקבוצה** וצריכות ללחוץ עליה בעצמן.
+• לא רשומים בוואטסאפ — המספר לא קיים.
+אל תסכמי הכל כ"נוספו". ציני כמה נכנסו בפועל, ומי לא, ולמה.`,
+  tools: ['prepareGroupCreation', 'confirmGroupCreation'],
+};
+
 const seniorStaff: WorkflowDefinition = {
   id: 'senior_staff',
   intent: 'SENIOR_STAFF',
@@ -200,6 +230,7 @@ export const WORKFLOWS: WorkflowDefinition[] = [
   seniorStaff,
   fyiBroadcast,
   messageRelay,
+  groupCreation,
   other,
 ];
 

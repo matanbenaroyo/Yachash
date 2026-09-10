@@ -17,6 +17,7 @@ export type ChatbotIntent =
   | 'SENIOR_STAFF'
   | 'FYI_BROADCAST'
   | 'MESSAGE_RELAY'
+  | 'GROUP_CREATION'
   | 'OTHER'
   | 'UNKNOWN';
 
@@ -30,6 +31,7 @@ export const CHATBOT_INTENTS: ChatbotIntent[] = [
   'SENIOR_STAFF',
   'FYI_BROADCAST',
   'MESSAGE_RELAY',
+  'GROUP_CREATION',
   'OTHER',
   'UNKNOWN',
 ];
@@ -106,6 +108,13 @@ export interface WorkflowContext {
   sendWhatsApp: (to: string, message: string) => Promise<void>;
   /** Sends a file from disk, for relaying an image the requester attached. */
   sendWhatsAppMedia: (to: string, filePath: string, caption?: string) => Promise<void>;
+  /** Creates a WhatsApp group, reporting what happened to each number. */
+  createWhatsAppGroup: (title: string, phoneNumbers: string[]) => Promise<{
+    ok: boolean;
+    groupId?: string;
+    error?: string;
+    results: Array<{ phone: string; outcome: 'added' | 'invited' | 'not_registered' | 'failed'; message: string }>;
+  }>;
   /** Resolved "today" for relative-date parsing, injected for testability. */
   now: Date;
 }

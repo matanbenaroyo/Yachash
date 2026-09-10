@@ -46,6 +46,55 @@ export function toLocalIsraeliPhone(input: unknown): string {
 }
 
 /**
+ * Pulls phone numbers out of a pasted list.
+ *
+ * People send these however it suited them at the time — one per line, comma
+ * separated, numbered "1. 050...", with names alongside, with hyphens or
+ * spaces inside the number. Rather than guess at a delimiter, this finds
+ * anything that looks like a number and converts it, which handles all of those
+ * without caring which one it is.
+ *
+ * Returns the recognised numbers de-duplicated in the order given, plus the
+ * fragments it could not read — the caller must show those rather than quietly
+ * dropping them, because a silently skipped person is one who never joins the
+ * group and nobody notices.
+ */
+export function extractPhoneNumbers(text: string): { numbers: string[]; unrecognised: string[] } {
+  const raw = String(text ?? '');
+  const numbers: string[] = [];
+  const unrecognised: string[] = [];
+  const seen = new Set<string>();
+
+  // Line by line, and the separator class must NOT include \s: that matches
+  // newlines, so a one-per-line list gets swallowed as a single run of digits
+  // and the whole list resolves to one nonsense number.
+  for (const line of raw.split(/\r?\n/)) {
+    // Drop an ordinal prefix first. "1. 0501234567" would otherwise parse as
+    // 10501234567 — eleven digits, which looks like a valid foreign number and
+    // would be dialled as one. A wrong number that looks right is worse than
+    // one that obviously fails.
+    const cleaned = line.replace(/^\s*\d{1,3}\s*[.)\-]\s+/, '');
+
+    const candidates = cleaned.match(/\+?\d[\d \t\-.()]{6,}/g) ?? [];
+    for (const candidate of candidates) {
+      const trimmed = candidate.trim();
+      if (digitsOnly(trimmed).length < 7) continue;
+
+      const normalised = toWhatsAppNumber(trimmed);
+      if (!normalised) {
+        unrecognised.push(trimmed);
+        continue;
+      }
+      if (seen.has(normalised)) continue;
+      seen.add(normalised);
+      numbers.push(normalised);
+    }
+  }
+
+  return { numbers, unrecognised };
+}
+
+/**
  * International form for SENDING: 0505556699 -> 972505556699.
  *
  * The inverse of the display helper above. WhatsAppManager.normalizeSendTarget

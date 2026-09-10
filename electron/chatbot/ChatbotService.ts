@@ -253,6 +253,22 @@ export class ChatbotService {
         if (!this.whatsappManager) throw new Error('WhatsApp manager not available');
         await this.whatsappManager.sendMedia(accountId, to, filePath, caption);
       },
+      createWhatsAppGroup: async (title, phoneNumbers) => {
+        if (!deliver) {
+          outbound.push({ to: `[group] ${title}`, message: `${phoneNumbers.length} participants` });
+          console.log(`🧪 [simulation] suppressed group creation "${title}"`);
+          // Simulation must not claim success it did not achieve, but it also
+          // must not look like a failure — report every number as pending-free
+          // so the test tab shows the shape of the real result.
+          return {
+            ok: true,
+            groupId: 'simulated@g.us',
+            results: phoneNumbers.map(phone => ({ phone, outcome: 'added' as const, message: 'simulated' })),
+          };
+        }
+        if (!this.whatsappManager) throw new Error('WhatsApp manager not available');
+        return this.whatsappManager.createGroupWithParticipants(accountId, title, phoneNumbers);
+      },
       now,
     };
 

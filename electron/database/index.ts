@@ -1037,6 +1037,30 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_chatbot_relays_requester ON chatbot_relays(requester_phone);
     CREATE INDEX IF NOT EXISTS idx_chatbot_relays_status ON chatbot_relays(status);
 
+    -- Groups an authorised member asked the bot to create.
+    --
+    -- Audit log, like chatbot_relays: creating a group notifies everyone in it
+    -- and cannot be quietly undone, so who asked for what needs to survive.
+    -- The results column holds the per-number outcome, which is not uniform:
+    -- some are added, some only invited because of their privacy settings, and
+    -- some are not on WhatsApp at all.
+    CREATE TABLE IF NOT EXISTS chatbot_group_creations (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      requester_phone TEXT NOT NULL,
+      requester_name TEXT,
+      group_name TEXT NOT NULL,
+      numbers TEXT,
+      group_id TEXT,
+      results TEXT,
+      status TEXT DEFAULT 'pending',
+      error TEXT,
+      prepared_turn INTEGER,
+      created_group_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_chatbot_group_creations_requester ON chatbot_group_creations(requester_phone);
+
     -- People who contacted the bot. Collected once, then reused so the bot
     -- never re-asks someone who already identified themselves.
     CREATE TABLE IF NOT EXISTS chatbot_known_contacts (
