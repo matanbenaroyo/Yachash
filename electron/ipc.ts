@@ -976,14 +976,22 @@ export function setupIPCHandlers() {
   });
 
   ipcMain.handle('contacts:delete', async (_event, id: string) => {
-    // Delete messages linked to chats of this contact
+    // Deleting one contact also removes their chats, messages and tag links,
+    // and the UI's "delete selected" calls this in a loop — so this handler is
+    // how hundreds of records disappear at once. It logged nothing, which meant
+    // 944 contacts, 822 tag links, 55 chats and 573 messages could vanish
+    // leaving no trace anywhere: not in the log, not in the activity feed.
+    // Working out what had happened took a backup diff.
+    const contact = db.prepare('SELECT phone_number, name FROM contacts WHERE id = ?').get(id) as any;
+
     db.prepare(`DELETE FROM messages WHERE software_chat_id IN (SELECT id FROM chats WHERE contact_id = ?)`).run(id);
-    // Delete chats linked to this contact
     db.prepare('DELETE FROM chats WHERE contact_id = ?').run(id);
-    // Delete contact tags
     db.prepare('DELETE FROM contact_tags WHERE contact_id = ?').run(id);
-    // Delete the contact
     db.prepare('DELETE FROM contacts WHERE id = ?').run(id);
+
+    if (contact) {
+      console.log(`🗑️ Deleted contact ${contact.phone_number}${contact.name ? ` (${contact.name})` : ''}`);
+    }
   });
 
   // Delete all contacts

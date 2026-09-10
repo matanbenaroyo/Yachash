@@ -719,20 +719,6 @@ export class WhatsAppManager {
           const ready = await this.waitForAccountReady(account.id, STARTUP_READY_TIMEOUT_MS);
           if (ready) {
             this.initProgress.completed++;
-          } else if (await this.probeAccountHealthy(account.id)) {
-            // The 'ready' event is not the only evidence, and it is not the
-            // best one. It can simply fail to arrive — the page loads, the
-            // socket connects and messages flow, but the event never fires, so
-            // this wait times out on a connection that is demonstrably working.
-            //
-            // Tearing it down here would destroy a live client and, worse,
-            // overwrite the health monitor's verified result with 'disconnected'
-            // moments after it proved the message bridge alive. A probe that
-            // round-trips into the page outranks an event that never came.
-            console.log(`✅ Account ${account.id.substring(0, 8)} never fired 'ready' but probes healthy - keeping it`);
-            this.readyAccounts.add(account.id);
-            this.updateAccountStatus(account.id, 'connected');
-            this.initProgress.completed++;
           } else {
             console.warn(`⚠️ Account ${account.id.substring(0, 8)} did not become ready within ${STARTUP_READY_TIMEOUT_MS / 1000}s - marking as disconnected`);
             // Explicitly mark as disconnected so the UI reflects the real state
@@ -1427,6 +1413,20 @@ export class WhatsAppManager {
     const client = this.clients.get(accountId);
     if (!client) return false;
 
+    // 'ready' is the library's own signal that the page-side wiring finished.
+    // In Client.js the sequence is `await this.attachEventListeners()` and then
+    // `this.emit(Events.READY)` — and Msg.on('add'), the listener that delivers
+    // every incoming message, is attached inside that method. So a client that
+    // never fired 'ready' never finished attaching it and can never receive.
+    //
+    // Checking window.onAddMessageEvent is NOT sufficient and was the mistake
+    // here: that function is exposed at the START of attachEventListeners,
+    // while the listener is wired much later in the same method. A client that
+    // began the method and then failed passes that check while being
+    // structurally deaf — which is exactly the state this account was in, with
+    // the probe reporting "message bridge alive" and zero messages all day.
+    if (!this.readyAccounts.has(accountId)) return false;
+
     try {
       const state = await rejectIfSilent(
         (client as any).getState(),
@@ -1574,10 +1574,30 @@ export class WhatsAppManager {
       console.log(`🔄 Retrying dormant account ${row.id} (attempt ${attempts})`);
       try {
         await this.reconnectAccount(row.id);
-        this.dormantRetries.delete(row.id);
-        console.log(`✅ Dormant account ${row.id} reconnected`);
+        // reconnectAccount resolving is not success: the account only counts as
+        // recovered once 'ready' has fired, because that is what proves the
+        // message listener is attached.
+        if (this.readyAccounts.has(row.id)) {
+          this.dormantRetries.delete(row.id);
+          console.log(`✅ Dormant account ${row.id} reconnected`);
+          continue;
+        }
+        console.warn(`⚠️ ${row.id} reconnected but never became ready (attempt ${attempts})`);
       } catch (error: any) {
         console.error(`❌ Dormant retry failed for ${row.id}:`, error?.message ?? error);
+      }
+
+      // Repeated reconnects that connect but never finish wiring usually mean
+      // the saved session is no longer usable and a fresh QR scan is needed.
+      // Without this the loop would retry quietly forever and the bot would
+      // simply never answer anyone.
+      if (attempts >= 3) {
+        this.healthReporter?.alert(
+          `never-ready:${row.id}`,
+          'החיבור לוואטסאפ עולה אבל לא מסיים להתחבר, ולכן הבוט לא מקבל הודעות.\n' +
+          'ניסיתי לחבר מחדש כמה פעמים ללא הצלחה.\n\n' +
+          'סביר שצריך לסרוק QR מחדש: עמוד חשבונות וואטסאפ ← תפריט ← איפוס סשן וסריקת QR מחדש.',
+        ).catch(() => undefined);
       }
     }
   }
