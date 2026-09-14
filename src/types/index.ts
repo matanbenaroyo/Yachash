@@ -375,6 +375,9 @@ export interface ChatbotConfig {
   fyiSenders: Array<{ phone: string; name: string; role: string }>;
   fyiGroups: Array<{ chatId: string; label: string }>;
   fyiDigestTime: string;
+  knowledgeEditors?: Array<{ phone: string; name: string; role: string }>;
+  knowledgeReminderTime?: string;
+  knowledgeReminderText?: string;
 }
 
 export interface ChatbotStatus {

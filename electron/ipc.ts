@@ -17,6 +17,7 @@ import { getChatbotConfig, saveChatbotConfig } from './chatbot/config';
 import { WORKFLOWS } from './chatbot/workflows';
 import { FyiDigestScheduler } from './chatbot/FyiDigestScheduler';
 import { HealthReporter } from './chatbot/HealthReporter';
+import { KnowledgeReminderScheduler } from './chatbot/KnowledgeReminderScheduler';
 import { parseContactRows, splitPastedText, type ParsedImportRow } from './chatbot/contacts';
 import { saveRegistryContact, importRegistryContacts, deleteRegistryContact } from './chatbot/registryStore';
 import { toLocalIsraeliPhone } from './chatbot/phone';
@@ -38,6 +39,7 @@ let chatbotService: ChatbotService;
 let knowledgeService: KnowledgeService;
 let fyiDigestScheduler: FyiDigestScheduler;
 let healthReporter: HealthReporter;
+let knowledgeReminderScheduler: KnowledgeReminderScheduler;
 
 // Helper function to normalize phone numbers for matching
 function normalizePhoneForMatching(phone: string): string[] {
@@ -173,6 +175,7 @@ async function initializeServices() {
   whatsappManager.setChatbotService(chatbotService);
   console.log('🤖 ChatbotService wired', chatbotService.getConfig().enabled ? '(enabled)' : '(disabled)');
   fyiDigestScheduler.start();
+  knowledgeReminderScheduler.start();
   healthReporter.start();
   whatsappManager.setHealthReporter(healthReporter);
 
@@ -215,18 +218,19 @@ export function setupIPCHandlers() {
 
   // Daily FYI digest. Resolves the WhatsApp manager and account lazily, because
   // neither exists until a license validates and an account connects.
-  fyiDigestScheduler = new FyiDigestScheduler(
-    getDatabase,
-    () => whatsappManager,
-    () => {
-      const config = getChatbotConfig(getDatabase());
-      if (config.accountIds.length) return config.accountIds[0];
-      const row = getDatabase()
-        .prepare(`SELECT id FROM accounts WHERE status = 'connected' ORDER BY created_at ASC LIMIT 1`)
-        .get() as { id?: string } | undefined;
-      return row?.id ?? null;
-    },
-  );
+  const botAccountId = () => {
+    const config = getChatbotConfig(getDatabase());
+    if (config.accountIds.length) return config.accountIds[0];
+    const row = getDatabase()
+      .prepare(`SELECT id FROM accounts WHERE status = 'connected' ORDER BY created_at ASC LIMIT 1`)
+      .get() as { id?: string } | undefined;
+    return row?.id ?? null;
+  };
+  fyiDigestScheduler = new FyiDigestScheduler(getDatabase, () => whatsappManager, botAccountId);
+
+  // Daily reminder to the knowledge editors. Sent from the bot's own account so
+  // a reply lands in the same conversation the reminder was recorded in.
+  knowledgeReminderScheduler = new KnowledgeReminderScheduler(getDatabase, () => whatsappManager, botAccountId);
 
   // Initialize only license manager (lightweight)
   licenseManager = new LicenseManager();

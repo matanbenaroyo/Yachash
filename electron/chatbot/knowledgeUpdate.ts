@@ -33,6 +33,9 @@ export const DEFAULT_KNOWLEDGE_EDITORS = [
   { phone: '972548323665', name: 'הילה בר לב', role: 'קה״ד יח״ש' },
 ];
 
+/** Daily reminder to the editors. `{שם}` becomes each recipient's first name. */
+export const DEFAULT_REMINDER_TEXT = 'היי {שם} מזכיר לך לעדכן מידע אם יש 🙂';
+
 export const UPDATE_TRIGGER = /(?:להלן|הנה)\s+מידע\s+חדש\s*[:：\-–—]?/;
 
 /** True when a message is asking to update the knowledge base. */

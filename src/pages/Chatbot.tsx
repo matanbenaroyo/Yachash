@@ -415,6 +415,29 @@ function SettingsTab({ config, save, saving, workflows }: any) {
               onClick={() => set('knowledgeEditors', [...(form.knowledgeEditors ?? []), { phone: '', name: '', role: '' }])}>
               <Plus className="h-4 w-4 ml-1" /> הוסף מורשה לעדכון
             </Button>
+
+            <div className="mt-4 pt-4 border-t space-y-2">
+              <Label htmlFor="reminderTime">תזכורת יומית לעדכון מידע</Label>
+              <Input id="reminderTime" className="max-w-[8rem]" value={form.knowledgeReminderTime ?? ''} placeholder="11:00"
+                onChange={e => set('knowledgeReminderTime', e.target.value)} />
+              <Textarea rows={2} value={form.knowledgeReminderText ?? ''}
+                onChange={e => set('knowledgeReminderText', e.target.value)} />
+              <p className="text-xs text-muted-foreground">
+                כל יום בשעה הזו נשלחת התזכורת לכל מי שברשימה למעלה. <b>{'{שם}'}</b> מתחלף בשם הפרטי של כל אחד מהם.
+                אם המחשב או הוואטסאפ לא היו זמינים — נשלחת עד 3 שעות באיחור, ואחרי זה מדלגים על היום.
+                השאר את השעה ריקה כדי לכבות.
+              </p>
+              {(form.knowledgeEditors ?? []).length > 0 && form.knowledgeReminderTime && (
+                <p className="text-xs rounded bg-muted px-3 py-2">
+                  כך זה ייראה אצל {form.knowledgeEditors[0].name || form.knowledgeEditors[0].phone}:{' '}
+                  <b>
+                    {(form.knowledgeReminderText || '')
+                      .replace(/\{שם\}/g, String(form.knowledgeEditors[0].name ?? '').trim().split(/\s+/)[0] ?? '')
+                      .replace(/[ \t]{2,}/g, ' ').trim()}
+                  </b>
+                </p>
+              )}
+            </div>
           </div>
         </CardContent>
       </Card>

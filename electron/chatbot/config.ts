@@ -6,7 +6,7 @@
 import type { ChatbotConfig } from './types';
 import { DEFAULT_SENIOR_STAFF_ROUTING, normalizePhone, type SeniorStaffRoute } from './seniorStaff';
 import { DEFAULT_FYI_SENDERS, DEFAULT_FYI_GROUPS, type FyiSender, type FyiGroup } from './fyi';
-import { DEFAULT_KNOWLEDGE_EDITORS } from './knowledgeUpdate';
+import { DEFAULT_KNOWLEDGE_EDITORS, DEFAULT_REMINDER_TEXT } from './knowledgeUpdate';
 
 const PREFIX = 'chatbot_';
 
@@ -34,6 +34,8 @@ const DEFAULTS: ChatbotConfig = {
   fyiGroups: DEFAULT_FYI_GROUPS,
   fyiDigestTime: '16:00',
   knowledgeEditors: DEFAULT_KNOWLEDGE_EDITORS,
+  knowledgeReminderTime: '11:00',
+  knowledgeReminderText: DEFAULT_REMINDER_TEXT,
   alertPhone: '',
   heartbeatTime: '08:00',
 };
@@ -139,6 +141,9 @@ export function getChatbotConfig(db: any): ChatbotConfig {
 
   const digestTime = (read('fyiDigestTime', '16:00') as string).trim();
   const heartbeatTime = (read('heartbeatTime', '08:00') as string).trim();
+  // Unlike the times above, a deliberately cleared reminder time stays empty:
+  // that is how the reminder is switched off. Only a malformed value falls back.
+  const reminderTime = (read('knowledgeReminderTime', DEFAULTS.knowledgeReminderTime) as string).trim();
 
   return {
     enabled: read('enabled', '0') === '1',
@@ -155,6 +160,8 @@ export function getChatbotConfig(db: any): ChatbotConfig {
     fyiGroups,
     fyiDigestTime: /^\d{1,2}:\d{2}$/.test(digestTime) ? digestTime : '16:00',
     knowledgeEditors,
+    knowledgeReminderTime: reminderTime === '' || /^\d{1,2}:\d{2}$/.test(reminderTime) ? reminderTime : DEFAULTS.knowledgeReminderTime,
+    knowledgeReminderText: (read('knowledgeReminderText', DEFAULTS.knowledgeReminderText) as string).trim() || DEFAULTS.knowledgeReminderText,
     alertPhone: normalizePhone(read('alertPhone', '') as string),
     heartbeatTime: /^\d{1,2}:\d{2}$/.test(heartbeatTime) ? heartbeatTime : '08:00',
   };
