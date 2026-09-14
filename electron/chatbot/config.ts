@@ -6,6 +6,7 @@
 import type { ChatbotConfig } from './types';
 import { DEFAULT_SENIOR_STAFF_ROUTING, normalizePhone, type SeniorStaffRoute } from './seniorStaff';
 import { DEFAULT_FYI_SENDERS, DEFAULT_FYI_GROUPS, type FyiSender, type FyiGroup } from './fyi';
+import { DEFAULT_KNOWLEDGE_EDITORS } from './knowledgeUpdate';
 
 const PREFIX = 'chatbot_';
 
@@ -32,6 +33,7 @@ const DEFAULTS: ChatbotConfig = {
   fyiSenders: DEFAULT_FYI_SENDERS,
   fyiGroups: DEFAULT_FYI_GROUPS,
   fyiDigestTime: '16:00',
+  knowledgeEditors: DEFAULT_KNOWLEDGE_EDITORS,
   alertPhone: '',
   heartbeatTime: '08:00',
 };
@@ -115,6 +117,26 @@ export function getChatbotConfig(db: any): ChatbotConfig {
     fyiGroups = DEFAULT_FYI_GROUPS;
   }
 
+  // Same defensive parsing as the FYI senders. An explicitly stored empty list
+  // means nobody may update; a corrupt value falls back to the default rather
+  // than silently opening or closing the door.
+  let knowledgeEditors: FyiSender[] = DEFAULT_KNOWLEDGE_EDITORS;
+  try {
+    const raw = map.get(PREFIX + 'knowledge_editors');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed
+          .filter((r: any) => r && r.phone)
+          .map((r: any) => ({ phone: normalizePhone(r.phone), name: String(r.name ?? ''), role: String(r.role ?? '') }))
+          .filter((r: FyiSender) => r.phone.length >= 9);
+        if (cleaned.length || parsed.length === 0) knowledgeEditors = cleaned;
+      }
+    }
+  } catch {
+    knowledgeEditors = DEFAULT_KNOWLEDGE_EDITORS;
+  }
+
   const digestTime = (read('fyiDigestTime', '16:00') as string).trim();
   const heartbeatTime = (read('heartbeatTime', '08:00') as string).trim();
 
@@ -132,6 +154,7 @@ export function getChatbotConfig(db: any): ChatbotConfig {
     fyiSenders,
     fyiGroups,
     fyiDigestTime: /^\d{1,2}:\d{2}$/.test(digestTime) ? digestTime : '16:00',
+    knowledgeEditors,
     alertPhone: normalizePhone(read('alertPhone', '') as string),
     heartbeatTime: /^\d{1,2}:\d{2}$/.test(heartbeatTime) ? heartbeatTime : '08:00',
   };
@@ -160,7 +183,7 @@ export function saveChatbotConfig(db: any, patch: Partial<ChatbotConfig>): void 
                     phone: normalizePhone(r.phone),
                   })),
                 )
-              : key === 'fyiSenders'
+              : key === 'fyiSenders' || key === 'knowledgeEditors'
                 ? JSON.stringify(
                     (Array.isArray(value) ? value : []).map((r: any) => ({
                       phone: normalizePhone(r.phone),

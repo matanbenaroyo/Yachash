@@ -168,6 +168,36 @@ const groupCreation: WorkflowDefinition = {
   tools: ['prepareGroupCreation', 'confirmGroupCreation'],
 };
 
+const knowledgeUpdate: WorkflowDefinition = {
+  id: 'knowledge_update',
+  intent: 'KNOWLEDGE_UPDATE',
+  label: 'עדכון מאגר המידע',
+  instructions: `מורשית שולחת מידע חדש למאגר ("להלן מידע חדש").
+ההרשאה נבדקת בכלים, לא על ידך.
+
+**אסור לך להקליד מחדש, לסכם או לנסח את המידע.** הכלי קורא את ההודעה שלה בעצמו.
+
+שלב 1 — קראי ל-proposeKnowledgeUpdate (בלי פרמטרים).
+הכלי שולח לה בעצמו תצוגה מקדימה מלאה: מה חדש, מה סותר את מה שקיים (ישן מול חדש), ומה זהה.
+אחרי שהוא חוזר — כתבי **שורה אחת קצרה** שמבקשת את אישורה. אל תחזרי על התוכן שכבר נשלח.
+
+שלב 2 — כשהיא עונה בהודעה נפרדת, קראי ל-applyKnowledgeUpdate:
+• "מאשרת" / "כן" / "הכל" → acceptDefaultsForRest=true, בלי overrides.
+• החלטות לפי מספר פריט → overrides, וגם acceptDefaultsForRest=true לשאר.
+    לגרוס / להחליף → "replace"
+    להשאיר (את הישן) → "keep"
+    להוסיף → "add"
+    לא להוסיף / לדלג → "skip"
+• "בטל" → cancel=true.
+• אם לא ברור מה היא רוצה לגבי פריט מסוים — שאלי. אל תנחשי.
+
+כלל: כשיש סתירה, המידע החדש שהיא שלחה הוא העדכני — זו ברירת המחדל. אבל ההחלטה שלה.
+
+שלב 3 — דווחי בקצרה כמה נוספו, כמה הוחלפו וכמה נשארו.
+אם הכלי מדווח על פריטים שלא עודכנו כי המאגר השתנה בינתיים — אמרי לה זאת במפורש.`,
+  tools: ['proposeKnowledgeUpdate', 'applyKnowledgeUpdate'],
+};
+
 const seniorStaff: WorkflowDefinition = {
   id: 'senior_staff',
   intent: 'SENIOR_STAFF',
@@ -231,6 +261,7 @@ export const WORKFLOWS: WorkflowDefinition[] = [
   fyiBroadcast,
   messageRelay,
   groupCreation,
+  knowledgeUpdate,
   other,
 ];
 

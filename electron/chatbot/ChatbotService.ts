@@ -23,6 +23,8 @@ import { buildSystemPrompt } from './prompts/system';
 import { TOOL_MAP, toolDefinitionsFor } from './tools';
 import { WORKFLOW_BY_ID, toolsForWorkflow, workflowForIntent } from './workflows';
 import { extractHebrewMonth, parseHebrewDate, parseHebrewTime } from './dateParser';
+import { isKnowledgeUpdate } from './knowledgeUpdate';
+import { findSender } from './fyi';
 
 /** Guard against a tool-call loop burning tokens on a single message. */
 const MAX_TOOL_ROUNDS = 5;
@@ -131,13 +133,22 @@ export class ChatbotService {
 
       // 1. Classify. Prior turns are included so a bare "12345678" is understood
       //    as the answer to the question the bot just asked.
-      const decision = await detectIntent({
-        client,
-        model: config.model,
-        message: text,
-        conversation,
-        recentTurns: recentTurns.slice(0, -1),
-      });
+      //
+      //    An authorised editor sending "להלן מידע חדש" skips the classifier. A
+      //    long block of dates and procedures reads a lot like an FYI broadcast
+      //    or a general question, and a misroute there would either publish her
+      //    update to the groups or answer it instead of saving it. The phrase and
+      //    the sender together are unambiguous, so this is decided in code.
+      const forcedUpdate = isKnowledgeUpdate(text) && Boolean(findSender(phoneNumber, config.knowledgeEditors));
+      const decision = forcedUpdate
+        ? { intent: 'KNOWLEDGE_UPDATE' as const, confidence: 1, extractedData: {}, needsClarification: false }
+        : await detectIntent({
+            client,
+            model: config.model,
+            message: text,
+            conversation,
+            recentTurns: recentTurns.slice(0, -1),
+          });
 
       // 2. Resolve extracted values into concrete data (dates/times are business
       //    logic, not something the model is trusted to compute).

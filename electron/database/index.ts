@@ -1037,6 +1037,28 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_chatbot_relays_requester ON chatbot_relays(requester_phone);
     CREATE INDEX IF NOT EXISTS idx_chatbot_relays_status ON chatbot_relays(status);
 
+    -- Knowledge-base updates sent over WhatsApp by an authorised editor.
+    --
+    -- This changes what the bot tells everyone, so the record is kept in full:
+    -- her original message, the items it was split into, what she decided for
+    -- each, and in the undo column every value that was overwritten — enough to
+    -- reverse one update without restoring a whole backup.
+    CREATE TABLE IF NOT EXISTS chatbot_knowledge_updates (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      requester_phone TEXT NOT NULL,
+      requester_name TEXT,
+      source_text TEXT,
+      items TEXT,
+      decisions TEXT,
+      undo TEXT,
+      status TEXT DEFAULT 'pending',
+      prepared_turn INTEGER,
+      applied_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_chatbot_knowledge_updates_requester ON chatbot_knowledge_updates(requester_phone, status);
+
     -- Groups an authorised member asked the bot to create.
     --
     -- Audit log, like chatbot_relays: creating a group notifies everyone in it

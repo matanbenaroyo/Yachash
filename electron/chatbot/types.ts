@@ -18,6 +18,7 @@ export type ChatbotIntent =
   | 'FYI_BROADCAST'
   | 'MESSAGE_RELAY'
   | 'GROUP_CREATION'
+  | 'KNOWLEDGE_UPDATE'
   | 'OTHER'
   | 'UNKNOWN';
 
@@ -32,6 +33,7 @@ export const CHATBOT_INTENTS: ChatbotIntent[] = [
   'FYI_BROADCAST',
   'MESSAGE_RELAY',
   'GROUP_CREATION',
+  'KNOWLEDGE_UPDATE',
   'OTHER',
   'UNKNOWN',
 ];
@@ -165,6 +167,8 @@ export interface ChatbotConfig {
   fyiGroups: Array<{ chatId: string; label: string }>;
   /** Daily digest time, 24h "HH:MM". Empty disables the digest. */
   fyiDigestTime: string;
+  /** Who may update the knowledge base by sending "להלן מידע חדש". */
+  knowledgeEditors: Array<{ phone: string; name: string; role: string }>;
   /** Where operational alerts and the daily heartbeat go. Empty disables both. */
   alertPhone: string;
   /** Time of day for the "still alive" heartbeat, HH:MM. */

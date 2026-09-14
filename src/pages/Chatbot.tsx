@@ -388,6 +388,34 @@ function SettingsTab({ config, save, saving, workflows }: any) {
               <Plus className="h-4 w-4 ml-1" /> הוסף מורשה
             </Button>
           </div>
+
+          <div className="rounded-lg border p-4">
+            <Label>מורשים לעדכן את מאגר המידע ({(form.knowledgeEditors ?? []).length})</Label>
+            <p className="text-xs text-muted-foreground mt-1">
+              מי שברשימה יכולה לשלוח לבוט "להלן מידע חדש" ואחריו את המידע. הבוט מציג לה מה חדש ומה סותר את הקיים,
+              והיא מאשרת מה להחליף ומה להשאיר לפני שמשהו משתנה. רשימה נפרדת וצרה יותר ממורשי ההפצה — כאן משנים את מה שהבוט עונה לכולם.
+            </p>
+            <div className="space-y-2 mt-2">
+              {(form.knowledgeEditors ?? []).map((r: any, i: number) => (
+                <div key={i} className="grid grid-cols-1 md:grid-cols-[11rem_1fr_1fr_2rem] gap-2">
+                  <Input value={r.phone ?? ''} placeholder="972501234567"
+                    onChange={e => { const n = [...form.knowledgeEditors]; n[i] = { ...n[i], phone: e.target.value }; set('knowledgeEditors', n); }} />
+                  <Input value={r.name ?? ''} placeholder="שם"
+                    onChange={e => { const n = [...form.knowledgeEditors]; n[i] = { ...n[i], name: e.target.value }; set('knowledgeEditors', n); }} />
+                  <Input value={r.role ?? ''} placeholder="תפקיד"
+                    onChange={e => { const n = [...form.knowledgeEditors]; n[i] = { ...n[i], role: e.target.value }; set('knowledgeEditors', n); }} />
+                  <Button size="sm" variant="ghost"
+                    onClick={() => set('knowledgeEditors', form.knowledgeEditors.filter((_: any, j: number) => j !== i))}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <Button size="sm" variant="outline" className="mt-2"
+              onClick={() => set('knowledgeEditors', [...(form.knowledgeEditors ?? []), { phone: '', name: '', role: '' }])}>
+              <Plus className="h-4 w-4 ml-1" /> הוסף מורשה לעדכון
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

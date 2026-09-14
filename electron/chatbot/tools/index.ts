@@ -20,6 +20,15 @@ import path from 'path';
 import fs from 'fs';
 import { app } from 'electron';
 import {
+  extractUpdateBody,
+  splitUpdateIntoItems,
+  proposeItems,
+  resolveDecisions,
+  renderPreview,
+  type ExistingEntry,
+} from '../knowledgeUpdate';
+import { createProposal, getPendingProposal, applyProposal } from '../knowledgeUpdateStore';
+import {
   FYI_FORMAT,
   findSender,
   parseFyiForm,
@@ -740,6 +749,173 @@ const confirmGroupCreation: ChatbotTool = {
   },
 };
 
+/** Upper bound on one update, so the preview stays something a person can read. */
+const MAX_UPDATE_ITEMS = 60;
+
+/**
+ * The editor's most recent message in this conversation, as it was received.
+ *
+ * Read from storage rather than passed in by the model: the model restating a
+ * long update would cost output tokens it may not have, and could alter the
+ * text on the way through. What goes into the knowledge base must be exactly
+ * what she wrote.
+ */
+function latestUserMessage(ctx: WorkflowContext): string {
+  try {
+    const row = ctx.db
+      .prepare(
+        `SELECT content FROM chatbot_messages
+         WHERE conversation_id = ? AND role = 'user'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(ctx.conversation.id) as { content?: string } | undefined;
+    return String(row?.content ?? '');
+  } catch {
+    return '';
+  }
+}
+
+const proposeKnowledgeUpdate: ChatbotTool = {
+  name: 'proposeKnowledgeUpdate',
+  description:
+    'Step 1 of updating the knowledge base from new information an authorised editor sent. Takes no ' +
+    'input — it reads her latest message itself, so NEVER retype or summarise the information. It splits ' +
+    'it into items, compares each with the existing knowledge, and SENDS HER THE FULL PREVIEW DIRECTLY. ' +
+    'Nothing is changed yet. After it returns, reply with one short line asking her to approve or decide ' +
+    'per item — do not repeat the preview.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: async (_input, ctx) => {
+    const editor = findSender(ctx.phoneNumber, ctx.config.knowledgeEditors);
+    if (!editor) {
+      return { ok: false, error: 'המספר הזה אינו מורשה לעדכן את מאגר המידע. לא שונה דבר.' };
+    }
+
+    const message = latestUserMessage(ctx);
+    const body = extractUpdateBody(message);
+    if (!body) {
+      return { ok: false, error: 'לא נמצא תוכן לעדכון. בקשי ממנה לשלוח את המידע עצמו.' };
+    }
+
+    const items = splitUpdateIntoItems(body);
+    if (!items.length) {
+      return { ok: false, error: 'לא הצלחתי לחלק את המידע לפריטים. בקשי לשלוח אותו שוב.' };
+    }
+    if (items.length > MAX_UPDATE_ITEMS) {
+      return {
+        ok: false,
+        error: `העדכון מכיל ${items.length} פריטים, והמקסימום להודעה אחת הוא ${MAX_UPDATE_ITEMS}. בקשי לפצל לכמה הודעות.`,
+      };
+    }
+
+    const existing = ctx.db
+      .prepare('SELECT id, category, title, content FROM chatbot_knowledge WHERE is_active = 1')
+      .all() as ExistingEntry[];
+    const proposed = proposeItems(items, existing);
+
+    createProposal(ctx.db, {
+      conversationId: ctx.conversation.id,
+      requesterPhone: ctx.phoneNumber,
+      requesterName: editor.name,
+      sourceText: body,
+      items: proposed,
+      preparedTurn: conversationTurn(ctx),
+    });
+
+    // The preview is sent from here, built in code. Letting the model relay it
+    // would mean she approves a paraphrase of what will actually be written.
+    for (const chunk of renderPreview(proposed)) {
+      await ctx.sendWhatsApp(ctx.phoneNumber, chunk);
+    }
+
+    const actionable = proposed.filter(p => p.kind !== 'unchanged').length;
+    return {
+      ok: true,
+      data: {
+        previewSent: true,
+        new: proposed.filter(p => p.kind === 'new').length,
+        changed: proposed.filter(p => p.kind === 'changed').length,
+        unchanged: proposed.filter(p => p.kind === 'unchanged').length,
+        note: actionable
+          ? 'התצוגה המקדימה נשלחה אליה. כתבי שורה קצרה אחת שמבקשת את אישורה. אל תחזרי על התוכן.'
+          : 'אין שינויים — הכל כבר קיים. אמרי לה זאת בקצרה.',
+      },
+    };
+  },
+};
+
+const applyKnowledgeUpdate: ChatbotTool = {
+  name: 'applyKnowledgeUpdate',
+  description:
+    'Step 2: applies the pending knowledge update according to the editor\'s reply. Call ONLY after she ' +
+    'answered the preview in a separate message. Map her words to actions per item number: ' +
+    'לגרוס/להחליף -> "replace", להשאיר -> "keep", להוסיף -> "add", לא להוסיף/לדלג -> "skip". ' +
+    'Set acceptDefaultsForRest=true when she approved ("מאשרת", "כן", "הכל") or gave per-item ' +
+    'instructions and did not ask to hold the rest. Set cancel=true if she wants to cancel.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      overrides: {
+        type: 'array',
+        description: 'Per-item decisions she stated explicitly',
+        items: {
+          type: 'object',
+          properties: {
+            item: { type: 'number' },
+            action: { type: 'string', enum: ['replace', 'keep', 'add', 'skip'] },
+          },
+          required: ['item', 'action'],
+        },
+      },
+      acceptDefaultsForRest: { type: 'boolean' },
+      cancel: { type: 'boolean' },
+    },
+    required: [],
+  },
+  execute: (input, ctx) => {
+    const editor = findSender(ctx.phoneNumber, ctx.config.knowledgeEditors);
+    if (!editor) return { ok: false, error: 'המספר הזה אינו מורשה. לא שונה דבר.' };
+
+    const pending = getPendingProposal(ctx.db, ctx.phoneNumber);
+    if (!pending) return { ok: false, error: 'אין עדכון שממתין לאישור. אפשר לשלוח "להלן מידע חדש" מחדש.' };
+
+    if (input.cancel === true) {
+      ctx.db.prepare(`UPDATE chatbot_knowledge_updates SET status='cancelled' WHERE id=?`).run(pending.id);
+      return { ok: true, data: { cancelled: true } };
+    }
+
+    // She has to have actually seen the preview and replied to it.
+    if (conversationTurn(ctx) <= pending.preparedTurn) {
+      return { ok: false, error: 'העדכון עוד לא הוצג לאישור. יש להמתין לתשובתה.' };
+    }
+
+    const { actions, errors } = resolveDecisions(
+      pending.items,
+      Array.isArray(input.overrides) ? input.overrides : [],
+      input.acceptDefaultsForRest === true,
+    );
+    if (errors.length) {
+      return { ok: false, error: `לא ניתן להחיל עדיין: ${errors.join(' · ')}. שאלי אותה על מה שחסר.` };
+    }
+
+    const result = applyProposal(ctx.db, pending, actions, editor.name);
+    console.log(
+      `📚 Knowledge update by ${editor.name}: +${result.added} ~${result.replaced} (summaries ${result.summariesUpdated}) ` +
+      `kept ${result.kept} skipped ${result.skipped} stale ${result.stale.length}`,
+    );
+
+    return {
+      ok: true,
+      data: {
+        ...result,
+        note: result.stale.length
+          ? `פריטים ${result.stale.join(', ')} לא עודכנו כי המידע במאגר השתנה מאז התצוגה המקדימה. ` +
+            'אמרי לה זאת, והציעי לשלוח אותם שוב.'
+          : 'דווחי לה בקצרה כמה נוספו, כמה הוחלפו וכמה נשארו.',
+      },
+    };
+  },
+};
+
 /** A resolved escalation destination, or the reason one could not be resolved. */
 type RankDestination =
   | { ok: true; phone: string; name: string; category: string; rank: string | null }
@@ -1032,6 +1208,8 @@ export const TOOLS: ChatbotTool[] = [
   confirmRelay,
   prepareGroupCreation,
   confirmGroupCreation,
+  proposeKnowledgeUpdate,
+  applyKnowledgeUpdate,
   getVehicleEntryFormat,
   searchGeneralKnowledge,
   searchOrders,

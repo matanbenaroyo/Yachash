@@ -17,7 +17,8 @@
     "electron:build": "vite build && electron-builder --publish never",
     "postinstall": "electron-builder install-app-deps",
     "typecheck": "tsc --noEmit",
-    "setup": "node node_modules/electron/install.js && electron-builder install-app-deps && puppeteer browsers install chrome"
+    "setup": "node node_modules/electron/install.js && electron-builder install-app-deps && puppeteer browsers install chrome",
+    "test:chatbot": "node tests/chatbot/run.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.116.0",
