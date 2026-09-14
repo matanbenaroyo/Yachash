@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Bot, Save, Send, Plus, Trash2, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Bot, Save, Send, Plus, Trash2, RefreshCw, AlertTriangle, Pencil, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -8,6 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui/use-toast';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
 /**
  * Management area for the מערך היח״ש AI chatbot.
@@ -700,40 +702,338 @@ function FyiTab({ api }: any) {
   );
 }
 
+/** 972509620042 -> 050-962-0042, for reading rather than for dialling. */
+function displayPhone(phone: string): string {
+  const d = String(phone ?? '').replace(/\D/g, '');
+  const local = d.startsWith('972') && d.length === 12 ? '0' + d.slice(3) : d;
+  return local.length === 10 ? `${local.slice(0, 3)}-${local.slice(3, 6)}-${local.slice(6)}` : phone;
+}
+
+/** 1995-04-03 -> 03/04/1995, --04-03 -> 03/04. */
+function displayBirthday(stored: string | null): string {
+  if (!stored) return '';
+  const full = stored.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (full) return `${full[3]}/${full[2]}/${full[1]}`;
+  const partial = stored.match(/^--(\d{2})-(\d{2})$/);
+  return partial ? `${partial[2]}/${partial[1]}` : stored;
+}
+
+/** Days to the next birthday, or null. Mirrors electron/chatbot/contacts.ts. */
+function daysToBirthday(stored: string | null): number | null {
+  const m = stored?.match(/(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const at = (y: number) => {
+    const leap = new Date(y, 1, 29).getMonth() === 1;
+    return new Date(y, month - 1, month === 2 && day === 29 && !leap ? 28 : day);
+  };
+  let next = at(today.getFullYear());
+  if (next < today) next = at(today.getFullYear() + 1);
+  return Math.round((next.getTime() - today.getTime()) / 86_400_000);
+}
+
+const EMPTY_CONTACT = { phone_number: '', full_name: '', personal_number: '', rank: '', birthday: '' };
+
 function ContactsTab({ api }: any) {
   const [items, setItems] = useState<any[]>([]);
-  useEffect(() => { api.getKnownContacts().then(setItems); }, []);
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState<{ form: typeof EMPTY_CONTACT; originalPhone?: string } | null>(null);
+  const [formErrors, setFormErrors] = useState<string[]>([]);
+  const [deleting, setDeleting] = useState<any | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const load = () => api.getKnownContacts().then(setItems);
+  useEffect(() => { load(); }, []);
+
+  const filtered = items.filter(c => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    const digits = q.replace(/\D/g, '');
+    return [c.full_name, c.personal_number, c.rank].some(v => String(v ?? '').toLowerCase().includes(q))
+      || (digits.length >= 3 && String(c.phone_number).includes(digits.replace(/^0/, '')));
+  });
+
+  const upcoming = items
+    .map(c => ({ c, days: daysToBirthday(c.birthday) }))
+    .filter(x => x.days !== null && x.days <= 7)
+    .sort((a, b) => (a.days as number) - (b.days as number));
+
+  const openEdit = (c?: any) => {
+    setFormErrors([]);
+    setEditing(c
+      ? {
+          originalPhone: c.phone_number,
+          form: {
+            phone_number: displayPhone(c.phone_number),
+            full_name: c.full_name ?? '',
+            personal_number: c.personal_number ?? '',
+            rank: c.rank ?? '',
+            birthday: displayBirthday(c.birthday),
+          },
+        }
+      : { form: { ...EMPTY_CONTACT } });
+  };
+
+  const save = async () => {
+    if (!editing) return;
+    const res = await api.saveKnownContact(editing.form, editing.originalPhone);
+    if (!res.ok) { setFormErrors(res.errors ?? ['השמירה נכשלה']); return; }
+    toast.success(editing.originalPhone ? 'איש הקשר עודכן' : 'איש הקשר נוסף');
+    setEditing(null);
+    load();
+  };
+
+  const confirmDelete = async () => {
+    if (!deleting) return;
+    await api.deleteKnownContact(deleting.phone_number);
+    toast.success('איש הקשר נמחק');
+    setDeleting(null);
+    load();
+  };
+
+  const set = (key: keyof typeof EMPTY_CONTACT, value: string) =>
+    setEditing(e => (e ? { ...e, form: { ...e.form, [key]: value } } : e));
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Input placeholder="חיפוש לפי שם, טלפון, מספר אישי או דרגה" value={query}
+          onChange={e => setQuery(e.target.value)} className="max-w-sm" />
+        <div className="flex-1" />
+        <Button variant="outline" onClick={() => setImporting(true)}>
+          <Upload className="h-4 w-4 ml-1" /> ייבוא מרובה
+        </Button>
+        <Button onClick={() => openEdit()}>
+          <Plus className="h-4 w-4 ml-1" /> הוספת איש קשר
+        </Button>
+      </div>
+
       <p className="text-sm text-muted-foreground">
-        אנשי קשר שפנו לבוט ומסרו את פרטיהם. הבוט לא מבקש אותם שוב.
+        {items.length} אנשי קשר. מי שמופיע כאן מזוהה על ידי הבוט, והוא לא יבקש ממנו שוב שם, מספר אישי ודרגה.
       </p>
-      {items.length === 0 && <p className="text-sm text-muted-foreground">אין עדיין אנשי קשר.</p>}
-      {items.length > 0 && (
+
+      {upcoming.length > 0 && (
+        <div className="rounded-lg border bg-accent/40 p-3 text-sm">
+          <div className="font-medium mb-1">🎂 ימי הולדת בשבוע הקרוב</div>
+          {upcoming.map(({ c, days }) => (
+            <div key={c.phone_number}>
+              {c.full_name || displayPhone(c.phone_number)} — {displayBirthday(c.birthday)}
+              <span className="text-muted-foreground"> ({days === 0 ? 'היום' : days === 1 ? 'מחר' : `בעוד ${days} ימים`})</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {filtered.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{items.length ? 'אין תוצאות לחיפוש.' : 'אין עדיין אנשי קשר.'}</p>
+      ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-muted-foreground">
               <tr className="text-right">
-                <th className="p-2">שם</th><th className="p-2">מספר אישי</th>
-                <th className="p-2">דרגה</th><th className="p-2">טלפון</th><th className="p-2">עודכן</th>
+                <th className="p-2">שם</th><th className="p-2">טלפון</th><th className="p-2">מספר אישי</th>
+                <th className="p-2">דרגה</th><th className="p-2">יום הולדת</th><th className="p-2 w-24"></th>
               </tr>
             </thead>
             <tbody>
-              {items.map(c => (
-                <tr key={c.phone_number} className="border-t">
-                  <td className="p-2">{c.full_name || '—'}</td>
-                  <td className="p-2">{c.personal_number || '—'}</td>
-                  <td className="p-2">{c.rank || '—'}</td>
-                  <td className="p-2 font-mono text-xs">{c.phone_number}</td>
-                  <td className="p-2 text-xs text-muted-foreground">{c.updated_at}</td>
-                </tr>
-              ))}
+              {filtered.map(c => {
+                const days = daysToBirthday(c.birthday);
+                return (
+                  <tr key={c.phone_number} className="border-t hover:bg-muted/40">
+                    <td className="p-2">{c.full_name || '—'}</td>
+                    <td className="p-2 font-mono text-xs" dir="ltr">{displayPhone(c.phone_number)}</td>
+                    <td className="p-2">{c.personal_number || '—'}</td>
+                    <td className="p-2">{c.rank || '—'}</td>
+                    <td className="p-2">
+                      {c.birthday ? displayBirthday(c.birthday) : '—'}
+                      {days !== null && days <= 7 && <span className="mr-1">🎂</span>}
+                    </td>
+                    <td className="p-2">
+                      <div className="flex gap-1 justify-end">
+                        <Button size="sm" variant="ghost" onClick={() => openEdit(c)} title="עריכה">
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setDeleting(c)} title="מחיקה">
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      <Dialog open={Boolean(editing)} onOpenChange={o => { if (!o) setEditing(null); }}>
+        <DialogContent dir="rtl">
+          <DialogHeader>
+            <DialogTitle>{editing?.originalPhone ? 'עריכת איש קשר' : 'הוספת איש קשר'}</DialogTitle>
+          </DialogHeader>
+          {editing && (
+            <div className="space-y-3">
+              <div><Label>שם מלא</Label>
+                <Input value={editing.form.full_name} onChange={e => set('full_name', e.target.value)} /></div>
+              <div><Label>טלפון *</Label>
+                <Input dir="ltr" placeholder="050-123-4567" value={editing.form.phone_number}
+                  onChange={e => set('phone_number', e.target.value)} /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label>מספר אישי</Label>
+                  <Input value={editing.form.personal_number} onChange={e => set('personal_number', e.target.value)} /></div>
+                <div><Label>דרגה</Label>
+                  <Input placeholder='סמ"ר, רס"ן…' value={editing.form.rank} onChange={e => set('rank', e.target.value)} /></div>
+              </div>
+              <div><Label>יום הולדת</Label>
+                <Input dir="ltr" placeholder="03/04/1995 או 03/04" value={editing.form.birthday}
+                  onChange={e => set('birthday', e.target.value)} />
+                <p className="text-xs text-muted-foreground mt-1">יום/חודש/שנה. אפשר בלי שנה.</p>
+              </div>
+              {formErrors.length > 0 && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-sm text-destructive">
+                  {formErrors.map(e => <div key={e}>{e}</div>)}
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setEditing(null)}>ביטול</Button>
+            <Button onClick={save}><Save className="h-4 w-4 ml-1" /> שמירה</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        onOpenChange={o => { if (!o) setDeleting(null); }}
+        onConfirm={confirmDelete}
+        title="מחיקת איש קשר"
+        description={deleting ? `למחוק את ${deleting.full_name || displayPhone(deleting.phone_number)}? הבוט יבקש ממנו שוב את פרטיו בפנייה הבאה.` : ''}
+        confirmText="מחיקה"
+        cancelText="ביטול"
+        variant="destructive"
+      />
+
+      <ImportContactsDialog api={api} open={importing} onClose={() => setImporting(false)} onImported={load} />
     </div>
+  );
+}
+
+/**
+ * Bulk import: paste from Excel or pick a file, see exactly what will happen,
+ * then import. Nothing is written until the last step.
+ *
+ * Rows that cannot be read are shown with their line number and the reason,
+ * and are never imported. Showing them matters: a row dropped without comment
+ * is a person who is missing from the registry and nobody finds out.
+ */
+function ImportContactsDialog({ api, open, onClose, onImported }: any) {
+  const [text, setText] = useState('');
+  const [preview, setPreview] = useState<{ rows: any[]; valid: number; invalid: number; fileName?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const reset = () => { setText(''); setPreview(null); setBusy(false); };
+  const close = () => { reset(); onClose(); };
+
+  const previewText = async () => {
+    if (!text.trim()) return;
+    setPreview(await api.previewContactImport(text));
+  };
+
+  const pickFile = async () => {
+    const res = await api.pickContactFile();
+    if (res) setPreview(res);
+  };
+
+  const runImport = async () => {
+    if (!preview) return;
+    setBusy(true);
+    const contacts = preview.rows.filter(r => r.contact).map(r => r.contact);
+    const res = await api.importKnownContacts(contacts);
+    setBusy(false);
+    if (!res.ok) { toast.error('הייבוא נכשל'); return; }
+    toast.success(`נוספו ${res.added}, עודכנו ${res.updated}${res.skipped ? `, דולגו ${res.skipped}` : ''}`);
+    onImported();
+    close();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={o => { if (!o) close(); }}>
+      <DialogContent dir="rtl" className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>ייבוא אנשי קשר</DialogTitle>
+        </DialogHeader>
+
+        {!preview ? (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              העתיקו שורות מאקסל והדביקו כאן, או בחרו קובץ. עמודות מוכרות: שם, טלפון, מספר אישי, דרגה, יום הולדת.
+              אם אין שורת כותרות — המערכת מזהה כל עמודה לפי התוכן.
+            </p>
+            <Textarea rows={10} dir="rtl" value={text} onChange={e => setText(e.target.value)}
+              placeholder={'שם\tטלפון\tמספר אישי\tדרגה\tיום הולדת\nמתן בנרויו\t050-962-0042\t7643131\tרס"ן\t03/04/1995'} />
+            <div className="flex gap-2">
+              <Button onClick={previewText} disabled={!text.trim()}>תצוגה מקדימה</Button>
+              <Button variant="outline" onClick={pickFile}><Upload className="h-4 w-4 ml-1" /> בחירת קובץ Excel / CSV</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2 text-sm">
+              {preview.fileName && <Badge variant="outline">{preview.fileName}</Badge>}
+              <Badge>{preview.valid} תקינים</Badge>
+              {preview.invalid > 0 && <Badge variant="destructive">{preview.invalid} לא ייובאו</Badge>}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              מי שכבר קיים לפי מספר הטלפון יעודכן — רק בשדות שמולאו כאן. שדה ריק בקובץ לא מוחק מידע קיים.
+            </p>
+            <div className="max-h-80 overflow-auto rounded border">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-background text-muted-foreground">
+                  <tr className="text-right">
+                    <th className="p-2">שורה</th><th className="p-2">שם</th><th className="p-2">טלפון</th>
+                    <th className="p-2">מ.א</th><th className="p-2">דרגה</th><th className="p-2">יום הולדת</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.rows.map(r => r.contact ? (
+                    <tr key={r.line} className="border-t">
+                      <td className="p-2 text-muted-foreground">{r.line}</td>
+                      <td className="p-2">{r.contact.full_name || '—'}</td>
+                      <td className="p-2 font-mono text-xs" dir="ltr">{r.contact.phone_display}</td>
+                      <td className="p-2">{r.contact.personal_number || '—'}</td>
+                      <td className="p-2">{r.contact.rank || '—'}</td>
+                      <td className="p-2">{displayBirthday(r.contact.birthday) || '—'}</td>
+                    </tr>
+                  ) : (
+                    <tr key={r.line} className="border-t bg-destructive/10">
+                      <td className="p-2 text-muted-foreground">{r.line}</td>
+                      <td className="p-2 text-destructive" colSpan={5}>
+                        <div className="font-medium">{r.errors.join(' · ')}</div>
+                        <div className="text-xs opacity-80 truncate">{r.raw}</div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter className="gap-2">
+          {preview && <Button variant="outline" onClick={() => setPreview(null)}>חזרה</Button>}
+          <Button variant="outline" onClick={close}>ביטול</Button>
+          {preview && (
+            <Button onClick={runImport} disabled={busy || preview.valid === 0}>
+              ייבוא {preview.valid} אנשי קשר
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

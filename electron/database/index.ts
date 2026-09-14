@@ -1068,6 +1068,7 @@ export async function initDatabase() {
       full_name TEXT,
       personal_number TEXT,
       rank TEXT,
+      birthday TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -1080,6 +1081,15 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_chatbot_knowledge_cat ON chatbot_knowledge(category, is_active);
     CREATE INDEX IF NOT EXISTS idx_chatbot_requests_phone ON chatbot_requests(phone_number);
   `);
+
+  // Birthdays arrived after the registry already had people in it. CREATE TABLE
+  // IF NOT EXISTS leaves an existing table untouched, so the column has to be
+  // added explicitly for installs that predate it.
+  try {
+    db.exec(`ALTER TABLE chatbot_known_contacts ADD COLUMN birthday TEXT;`);
+  } catch {
+    // Column already exists
+  }
 
   // Seed demo/placeholder knowledge once, so the feature is explorable before
   // real organizational data is entered. Marked clearly as demo content.

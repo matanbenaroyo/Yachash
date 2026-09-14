@@ -17,6 +17,9 @@ import { getChatbotConfig, saveChatbotConfig } from './chatbot/config';
 import { WORKFLOWS } from './chatbot/workflows';
 import { FyiDigestScheduler } from './chatbot/FyiDigestScheduler';
 import { HealthReporter } from './chatbot/HealthReporter';
+import { parseContactRows, splitPastedText, type ParsedImportRow } from './chatbot/contacts';
+import { saveRegistryContact, importRegistryContacts, deleteRegistryContact } from './chatbot/registryStore';
+import { toLocalIsraeliPhone } from './chatbot/phone';
 import { logger } from './logger';
 import * as XLSX from 'xlsx';
 import fs from 'fs';
@@ -3034,16 +3037,105 @@ export function setupIPCHandlers() {
   });
 
   // ---- Contacts who wrote to the bot ----
+  // No row limit: the registry is now filled by bulk import as well as by
+  // people writing in, and a silent cap would make imported people look
+  // missing.
   ipcMain.handle('chatbot:getKnownContacts', () => withDbRecovery(() =>
     getDatabase()
-      .prepare(`SELECT * FROM chatbot_known_contacts ORDER BY updated_at DESC LIMIT 500`)
+      .prepare(`SELECT * FROM chatbot_known_contacts ORDER BY COALESCE(full_name, phone_number) COLLATE NOCASE`)
       .all(),
   ));
+
+  // Add or edit one person; see registryStore for why a phone change is a
+  // guarded rename rather than an overwrite.
+  ipcMain.handle('chatbot:saveKnownContact', (_event, input: any, originalPhone?: string) => withDbRecovery(() => {
+    const result = saveRegistryContact(getDatabase(), input, originalPhone);
+    if (result.ok) {
+      console.log(`📇 Registry ${originalPhone ? 'updated' : 'added'}: ${result.contact.phone_number}${result.contact.full_name ? ` (${result.contact.full_name})` : ''}`);
+    }
+    return result;
+  }));
+
+  // Logged, unlike the original contacts:delete: a deletion that leaves no
+  // trace is how 944 contacts disappeared with nothing to show for it.
+  ipcMain.handle('chatbot:deleteKnownContact', (_event, phone: string) => withDbRecovery(() => {
+    const { deleted, name } = deleteRegistryContact(getDatabase(), phone);
+    if (deleted) console.log(`🗑️ Registry deleted: ${phone}${name ? ` (${name})` : ''}`);
+    return { ok: deleted };
+  }));
+
+  /** Parses pasted text for the preview. Writes nothing. */
+  ipcMain.handle('chatbot:previewContactImport', (_event, text: string) => {
+    return summariseImport(parseContactRows(splitPastedText(text)));
+  });
+
+  /** Lets the user pick a spreadsheet, and parses it for the preview. Writes nothing. */
+  ipcMain.handle('chatbot:pickContactFile', async () => {
+    const { dialog } = await import('electron');
+    const result = await dialog.showOpenDialog({
+      title: 'בחירת קובץ אנשי קשר',
+      properties: ['openFile'],
+      filters: [{ name: 'גיליון אלקטרוני', extensions: ['xlsx', 'xls', 'csv'] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+
+    const filePath = result.filePaths[0];
+    return { fileName: path.basename(filePath), ...summariseImport(parseContactRows(readSpreadsheetRows(filePath))) };
+  });
+
+  // Bulk import; see registryStore for why empty cells never erase existing data.
+  ipcMain.handle('chatbot:importKnownContacts', (_event, contacts: any[]) => withDbRecovery(() => {
+    const { added, updated, skipped } = importRegistryContacts(getDatabase(), contacts);
+    console.log(`📇 Registry import: ${added} added, ${updated} updated, ${skipped} skipped`);
+    return { ok: true, added, updated, skipped };
+  }));
 
   ipcMain.handle('chatbot:resetConversation', (_event, phoneNumber: string) => {
     db.prepare(`UPDATE chatbot_conversations SET status = 'completed' WHERE phone_number = ? AND status = 'active'`)
       .run(phoneNumber);
   });
+}
+
+/**
+ * Reads a spreadsheet into rows of cells for the registry parser.
+ *
+ * Cells are read raw, not as displayed. A date cell's display text depends on
+ * the locale Excel formatted it in, so 03/04/1995 can come back as "4/3/95" —
+ * the same string the parser would read as the 4th of March. The raw serial
+ * number is unambiguous, and the parser understands it.
+ */
+function readSpreadsheetRows(filePath: string): string[][] {
+  if (filePath.toLowerCase().endsWith('.csv')) {
+    let text = fs.readFileSync(filePath, 'utf8');
+    // Excel on Hebrew Windows saves CSV as windows-1255, not UTF-8; read as
+    // UTF-8 every Hebrew name comes out as replacement characters.
+    if (text.includes('�')) {
+      text = new TextDecoder('windows-1255').decode(fs.readFileSync(filePath));
+    }
+    return splitPastedText(text);
+  }
+
+  const workbook = XLSX.readFile(filePath);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) return [];
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: '' });
+  return rows.map(row => (Array.isArray(row) ? row : []).map(cell => (cell === null || cell === undefined ? '' : String(cell).trim())));
+}
+
+/** Shapes parsed rows for the preview table. */
+function summariseImport(rows: ParsedImportRow[]) {
+  return {
+    rows: rows.map(r => ({
+      line: r.line,
+      contact: r.contact
+        ? { ...r.contact, phone_display: toLocalIsraeliPhone(r.contact.phone_number) }
+        : null,
+      errors: r.errors,
+      raw: r.raw,
+    })),
+    valid: rows.filter(r => r.contact).length,
+    invalid: rows.filter(r => !r.contact).length,
+  };
 }
 
 /**

@@ -633,6 +633,11 @@ export interface ElectronAPI {
     getFyiMessages: () => Promise<any[]>;
     sendDigestNow: () => Promise<{ ok: boolean; count: number; delivered: string[]; error?: string }>;
     getKnownContacts: () => Promise<any[]>;
+    saveKnownContact: (contact: any, originalPhone?: string) => Promise<{ ok: boolean; errors?: string[]; contact?: any }>;
+    deleteKnownContact: (phone: string) => Promise<{ ok: boolean }>;
+    previewContactImport: (text: string) => Promise<{ rows: any[]; valid: number; invalid: number }>;
+    pickContactFile: () => Promise<{ fileName: string; rows: any[]; valid: number; invalid: number } | null>;
+    importKnownContacts: (contacts: any[]) => Promise<{ ok: boolean; added: number; updated: number; skipped: number }>;
     simulate: (phoneNumber: string, message: string) => Promise<{ handled: boolean; reply?: string; intent?: string; error?: string }>;
     resetConversation: (phoneNumber: string) => Promise<void>;
   };
