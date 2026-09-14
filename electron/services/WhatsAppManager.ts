@@ -115,6 +115,9 @@ const HEALTH_PROBE_TIMEOUT_MS = 20_000;
 /** Consecutive failed probes before an account is rebuilt. */
 const UNHEALTHY_STRIKES = 2;
 
+/** How long a dormant-account retry waits for 'ready' before calling it a failure. */
+const DORMANT_READY_TIMEOUT_MS = 90_000;
+
 /**
  * Rejects if `promise` neither settles nor reports progress in time.
  *
@@ -242,6 +245,12 @@ export class WhatsAppManager {
   private unhealthyCounts: Map<string, number> = new Map();
   /** Reconnect attempts for accounts with a session but no live client. */
   private dormantRetries: Map<string, number> = new Map();
+  /**
+   * Accounts the startup restore is still waiting on. The health check leaves
+   * them alone: if it reconnected one, the startup timeout would then tear down
+   * the NEW client it finds under that id.
+   */
+  private awaitingStartupReady: Set<string> = new Set();
 
   constructor(dbOrGetter: Database | (() => Database)) {
     this.resolveDb = typeof dbOrGetter === 'function' ? dbOrGetter : () => dbOrGetter;
@@ -300,6 +309,40 @@ export class WhatsAppManager {
    */
   getInitializationProgress(): InitializationProgress {
     return { ...this.initProgress };
+  }
+
+  /**
+   * Which WhatsApp Web build to load.
+   *
+   * WhatsApp ships a new web build several times a week, and whatsapp-web.js
+   * only works with the builds it knows how to hook into. On 14.09.2026 build
+   * 2.3000.1047451014 went out between one restart and the next: the account
+   * still authenticated, but 'ready' never fired, so the bot connected and
+   * received nothing. Loading the previous build from the local cache is the
+   * fix, and `whatsapp_web_version` in settings names it. Clear the setting to
+   * go back to the latest build once the library catches up.
+   *
+   * The cache lives under userData. The library default is a path relative to
+   * the working directory, which is wherever the app happened to be launched
+   * from — a desktop shortcut and a terminal each got a different cache, and a
+   * pinned build would be found in one and silently missing in the other.
+   */
+  private webVersionOptions(userDataPath: string): Record<string, unknown> {
+    const cachePath = path.join(userDataPath, 'wwebjs_cache');
+    const options: Record<string, unknown> = { webVersionCache: { type: 'local', path: cachePath } };
+
+    let pinned = '';
+    try {
+      pinned = String((this.db.prepare(`SELECT value FROM settings WHERE key = 'whatsapp_web_version'`).get() as any)?.value ?? '').trim();
+    } catch { /* no pin */ }
+    if (!pinned) return options;
+
+    if (!fs.existsSync(path.join(cachePath, `${pinned}.html`))) {
+      console.warn(`🌐 WhatsApp Web ${pinned} is pinned but not in ${cachePath} - loading the latest build instead`);
+      return options;
+    }
+    console.log(`🌐 Loading pinned WhatsApp Web build ${pinned}`);
+    return { ...options, webVersion: pinned };
   }
 
   /**
@@ -716,7 +759,13 @@ export class WhatsAppManager {
           // fails fast regardless of this value, since waitForAccountReady
           // resolves as soon as the client is removed from this.clients.
           const STARTUP_READY_TIMEOUT_MS = 180000; // 3 minutes
-          const ready = await this.waitForAccountReady(account.id, STARTUP_READY_TIMEOUT_MS);
+          this.awaitingStartupReady.add(account.id);
+          let ready = false;
+          try {
+            ready = await this.waitForAccountReady(account.id, STARTUP_READY_TIMEOUT_MS);
+          } finally {
+            this.awaitingStartupReady.delete(account.id);
+          }
           if (ready) {
             this.initProgress.completed++;
           } else {
@@ -819,6 +868,7 @@ export class WhatsAppManager {
         // handler) instead of fighting for the session.
         restartOnAuthFail: true,
         takeoverOnConflict: false,
+        ...this.webVersionOptions(userDataPath),
         // userAgent: false disables whatsapp-web.js's own default UA override
         // (util/Constants.js ships a hardcoded, years-old Chrome/Mac string). Without
         // this, every account's page would claim to be that stale UA while actually
@@ -1456,6 +1506,7 @@ export class WhatsAppManager {
     try {
       for (const [accountId, client] of Array.from(this.clients.entries())) {
         if (this.connectingAccounts.has(accountId)) continue; // mid-connect, not yet its business
+        if (this.awaitingStartupReady.has(accountId)) continue; // the startup restore owns it until its timeout
 
         let state: string | null = null;
         try {
@@ -1492,7 +1543,15 @@ export class WhatsAppManager {
           console.warn(`💔 Bridge probe failed for ${accountId}:`, error?.message ?? error);
         }
 
-        if (state === 'CONNECTED' && bridgeAlive) {
+        // 'ready' is required as well, for the reason spelled out in
+        // probeAccountHealthy: the bridge function exists from the START of
+        // attachEventListeners, but the listener that delivers messages is only
+        // wired at its end, right before 'ready'. Without this, a client that
+        // never fired 'ready' was logged as healthy and its row corrected to
+        // 'connected' while it could not receive a single message.
+        const ready = this.readyAccounts.has(accountId);
+
+        if (state === 'CONNECTED' && bridgeAlive && ready) {
           this.unhealthyCounts.delete(accountId);
 
           // Write health back to the row, don't just observe it. The status is
@@ -1521,7 +1580,7 @@ export class WhatsAppManager {
         this.unhealthyCounts.set(accountId, strikes);
         console.warn(
           `💔 Account ${accountId} unhealthy (state=${state ?? 'no response'}, ` +
-          `messageBridge=${bridgeAlive ? 'alive' : 'DEAD'}, strike ${strikes}/${UNHEALTHY_STRIKES})`,
+          `messageBridge=${bridgeAlive ? 'alive' : 'DEAD'}, ready=${ready ? 'yes' : 'NEVER'}, strike ${strikes}/${UNHEALTHY_STRIKES})`,
         );
 
         if (strikes < UNHEALTHY_STRIKES) continue;
@@ -1576,8 +1635,11 @@ export class WhatsAppManager {
         await this.reconnectAccount(row.id);
         // reconnectAccount resolving is not success: the account only counts as
         // recovered once 'ready' has fired, because that is what proves the
-        // message listener is attached.
-        if (this.readyAccounts.has(row.id)) {
+        // message listener is attached. It resolves when initialize() returns,
+        // which is seconds BEFORE 'ready' — checking at that instant reported
+        // every retry as "never became ready", and a working reconnect still
+        // counted towards the "scan the QR again" alert.
+        if (await this.waitForAccountReady(row.id, DORMANT_READY_TIMEOUT_MS)) {
           this.dormantRetries.delete(row.id);
           console.log(`✅ Dormant account ${row.id} reconnected`);
           continue;
