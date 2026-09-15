@@ -115,8 +115,17 @@ const HEALTH_PROBE_TIMEOUT_MS = 20_000;
 /** Consecutive failed probes before an account is rebuilt. */
 const UNHEALTHY_STRIKES = 2;
 
-/** How long a dormant-account retry waits for 'ready' before calling it a failure. */
-const DORMANT_READY_TIMEOUT_MS = 90_000;
+/**
+ * How long one connection attempt is given to reach 'ready'. When it works it
+ * takes about five seconds; an attempt still stuck after this is stuck for good.
+ */
+const READY_ATTEMPT_TIMEOUT_MS = 45_000;
+
+/** How many times to start a connection over before giving up on it. */
+const READY_ATTEMPTS = 5;
+
+/** Breathing room between attempts, so retries are not read as a reconnect storm. */
+const RETRY_GAP_MS = 5_000;
 
 /**
  * Rejects if `promise` neither settles nor reports progress in time.
@@ -740,36 +749,20 @@ export class WhatsAppManager {
             type: 'http' as 'http' | 'socks5' // Always HTTP
           } : undefined;
 
-          await this.connectAccount(account.id, proxy);
-
-          // connectAccount() resolves when client.initialize() returns, but the
-          // 'ready' event (and full WhatsApp Web readiness) fires asynchronously
-          // AFTER that. Wait for the account to become truly ready before
-          // counting it as completed so the startup loader reflects real state.
-          //
-          // This timeout needs to be generous: at startup, several heavy
-          // Chromium/WhatsApp-Web instances are loading concurrently (see
-          // getAdaptiveBatchSize), and later batches start under even more
-          // system load than the manual "Reconnect" flow (which has no
-          // timeout at all and just waits). A too-short timeout here causes
-          // us to destroy a client - and its still-valid WhatsApp session -
-          // simply because it needed a bit longer to finish loading under
-          // contention, even though the account is still linked on WhatsApp's
-          // side. A genuinely broken session (auth failure/logged out) still
-          // fails fast regardless of this value, since waitForAccountReady
-          // resolves as soon as the client is removed from this.clients.
-          const STARTUP_READY_TIMEOUT_MS = 180000; // 3 minutes
+          // connectAccount() resolves when client.initialize() returns, but
+          // 'ready' fires asynchronously after that, and reaching it is not a
+          // given - see connectUntilReady.
           this.awaitingStartupReady.add(account.id);
           let ready = false;
           try {
-            ready = await this.waitForAccountReady(account.id, STARTUP_READY_TIMEOUT_MS);
+            ready = await this.connectUntilReady(account.id, proxy);
           } finally {
             this.awaitingStartupReady.delete(account.id);
           }
           if (ready) {
             this.initProgress.completed++;
           } else {
-            console.warn(`⚠️ Account ${account.id.substring(0, 8)} did not become ready within ${STARTUP_READY_TIMEOUT_MS / 1000}s - marking as disconnected`);
+            console.warn(`⚠️ Account ${account.id.substring(0, 8)} never became ready - marking as disconnected`);
             // Explicitly mark as disconnected so the UI reflects the real state
             this.updateAccountStatus(account.id, 'disconnected');
             // Tear down the stuck client to free resources
@@ -792,6 +785,60 @@ export class WhatsAppManager {
     this.initProgress.isComplete = true;
     this.emitInitProgress();
     console.log(`✅ Initialization complete: ${this.initProgress.completed} connected, ${this.initProgress.failed} failed`);
+  }
+
+  /**
+   * Connects, and keeps starting over until the account can actually receive.
+   *
+   * A connection that authenticates but never fires 'ready' is neither rare nor
+   * a broken session: WhatsApp Web hands whatsapp-web.js a page its injection
+   * cannot finish on, and the very same session connects on a later attempt.
+   * Measured on 15.09.2026 against the real session, repeatedly, under identical
+   * options: roughly one attempt in three reached ready, in about five seconds,
+   * and the rest sat authenticated forever. Waiting longer does not help; only
+   * starting over does.
+   *
+   * Before this, one attempt was given three minutes and the account was then
+   * left disconnected until the next retry. That is what kept the bot off
+   * WhatsApp for hours: every attempt stopped one step short of receiving.
+   */
+  private async connectUntilReady(
+    accountId: string,
+    proxy?: ProxyConfig,
+    attempts: number = READY_ATTEMPTS,
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await this.connectAccount(accountId, proxy);
+      } catch (error: any) {
+        console.error(`❌ Connect attempt ${attempt}/${attempts} for ${accountId} failed:`, error?.message ?? error);
+      }
+
+      if (await this.waitForAccountReady(accountId, READY_ATTEMPT_TIMEOUT_MS)) {
+        if (attempt > 1) console.log(`✅ ${accountId} ready on attempt ${attempt}/${attempts}`);
+        return true;
+      }
+
+      // A client that is gone (auth failure, logged out) is a different problem,
+      // and retrying here would fight whatever removed it.
+      if (!this.clients.has(accountId)) {
+        console.warn(`⚠️ ${accountId} lost its client during attempt ${attempt} - not retrying here`);
+        return false;
+      }
+
+      console.warn(
+        `⚠️ ${accountId} authenticated but not ready within ${READY_ATTEMPT_TIMEOUT_MS / 1000}s ` +
+        `(attempt ${attempt}/${attempts})${attempt < attempts ? ' - starting over' : ''}`,
+      );
+
+      try {
+        await this.cleanupAccountResources(accountId, this.clients.get(accountId));
+      } catch (cleanupError: any) {
+        console.error(`Cleanup error for ${accountId}:`, cleanupError?.message ?? cleanupError);
+      }
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, RETRY_GAP_MS));
+    }
+    return false;
   }
 
   async connectAccount(accountId: string, proxy?: ProxyConfig, pairingMethod: 'qr' | 'code' = 'qr'): Promise<void> {
@@ -869,53 +916,39 @@ export class WhatsAppManager {
         restartOnAuthFail: true,
         takeoverOnConflict: false,
         ...this.webVersionOptions(userDataPath),
-        // userAgent: false disables whatsapp-web.js's own default UA override
-        // (util/Constants.js ships a hardcoded, years-old Chrome/Mac string). Without
-        // this, every account's page would claim to be that stale UA while actually
-        // running whatever real Chrome/Chromium version is installed - a mismatch
-        // that's a classic automation fingerprint. false lets the real browser's own
-        // accurate UA pass through untouched.
-        userAgent: false,
+        // The user agent is left to whatsapp-web.js, which sends its own (older)
+        // string from util/Constants.js.
+        //
+        // This used to be `userAgent: false`, so the real Chrome UA passed through,
+        // on the reasoning that a stale UA on a modern browser is an automation
+        // fingerprint. It was removed while hunting the 15.09.2026 outage. The
+        // measurement that matters was the flag list below, not this; the single
+        // attempt made with the real UA failed, which proves nothing on its own.
+        // It stays on the library's default because that is the configuration the
+        // library is written and tested against — its page-side code and its UA
+        // are meant to go together.
         puppeteer: {
           headless: true,
           executablePath: chromePath,
-          // Realistic desktop viewport - puppeteer's 800x600 default is a common
-          // automation fingerprint that doesn't match real desktop usage.
-          defaultViewport: { width: 1366, height: 768 },
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
-            // Resource-saving flags: disable Chrome background services/telemetry
-            // that are irrelevant to headless WhatsApp Web automation, to reduce
-            // per-account CPU/RAM/network overhead when many accounts are connected.
-            '--disable-background-networking',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--disable-breakpad',
-            '--disable-component-update',
-            '--disable-client-side-phishing-detection',
-            '--disable-domain-reliability',
-            '--disable-hang-monitor',
-            '--disable-ipc-flooding-protection',
-            '--disable-sync',
-            '--disable-extensions',
-            '--disable-default-apps',
-            '--disable-notifications',
-            '--metrics-recording-only',
-            '--no-default-browser-check',
-            '--no-pings',
-            '--password-store=basic',
-            '--mute-audio',
-            '--disk-cache-size=0',
-            '--memory-pressure-off',
-            '--disable-features=Translate,TranslateUI'
-          ]
+          // Chrome is launched with as little as possible on the command line,
+          // and this is deliberate.
+          //
+          // There used to be 29 flags here: a fingerprint-flavoured viewport plus
+          // a long list of resource-saving switches, added for hosts running many
+          // accounts at once. On 15.09.2026 the bot could not connect at all -
+          // every attempt authenticated and then never fired 'ready', which is the
+          // point at which whatsapp-web.js attaches the listener that delivers
+          // incoming messages, so the account looked online and received nothing.
+          //
+          // Measured against the real session, same code, same build, alternating:
+          //   --no-sandbox --disable-dev-shm-usage only : ready in ~5s, most attempts
+          //   the full 29-flag set                      : never ready, 6 attempts, 0 successes
+          // Both halves of the list failed on their own, so it is not one bad flag.
+          //
+          // Anything added here has to be re-tested the same way. Saving a little
+          // RAM is worth nothing if the bot cannot receive a message.
+          defaultViewport: null,
+          args: ['--no-sandbox', '--disable-dev-shm-usage'],
         }
       };
 
@@ -1632,14 +1665,11 @@ export class WhatsAppManager {
 
       console.log(`🔄 Retrying dormant account ${row.id} (attempt ${attempts})`);
       try {
-        await this.reconnectAccount(row.id);
-        // reconnectAccount resolving is not success: the account only counts as
-        // recovered once 'ready' has fired, because that is what proves the
-        // message listener is attached. It resolves when initialize() returns,
-        // which is seconds BEFORE 'ready' — checking at that instant reported
-        // every retry as "never became ready", and a working reconnect still
-        // counted towards the "scan the QR again" alert.
-        if (await this.waitForAccountReady(row.id, DORMANT_READY_TIMEOUT_MS)) {
+        // Clear out whatever is left, then keep trying until it is ready:
+        // 'ready' is what proves the message listener is attached, and a single
+        // attempt reaching it is far from certain.
+        await this.cleanupAccountResources(row.id, this.clients.get(row.id));
+        if (await this.connectUntilReady(row.id)) {
           this.dormantRetries.delete(row.id);
           console.log(`✅ Dormant account ${row.id} reconnected`);
           continue;
