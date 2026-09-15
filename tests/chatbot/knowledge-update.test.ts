@@ -40,6 +40,51 @@ eq('three items (two bullets + one paragraph)', items.length, 3);
 eq('bullet keeps the heading as context', items[0].content, 'ספטמבר 2026\n15/09/26–08/12/26 — קק״צ 94');
 eq('paragraph kept verbatim', items[2].content, 'נוהל חדש: מעכשיו אישורי כניסה נשלחים עד 48 שעות מראש.');
 
+console.log('\n=== a policy document stays ONE item (15.09.2026 incident) ===');
+// Same shape as the update that was cut into nine fragments in production:
+// a bold heading, a greeting, numbered sections and two sub-bullets inside one
+// of them. Content is invented; only the structure is what matters here.
+const DOCUMENT = `*עדכון והנחיה – נוהל לדוגמה*
+
+שלום לכולם,
+
+בהתאם להחלטה, חל שינוי בנוהל לדוגמה.
+
+1. השלב הראשון, שיבוצע ע"י הגורם המוסמך, יחליף את השלב שהיה נהוג עד כה.
+בהתאם לכך, השלב הקודם מבוטל ולא יתקיים עוד.
+לאחר ביצועו, כל גורם יעביר:
+▪️ סעיף ראשון
+▪️ סעיף שני
+
+הגורם המרכז יבצע את התהליך בהתאם לקריטריונים הקבועים ולצרכים.
+בסיום התהליך יופץ סיכום ובו הפרטים הרלוונטיים.
+
+2. *בנוסף, החל ממועד זה נעצרת ההקצאה לדוגמה.*
+
+המשמעות היא כי לא תאושר הקצאה לגורמים בעלי ותק של 19 חודשים ומעלה.
+
+מצורפת מדיניות לדוגמה, אשר תהווה חלק מהתהליך.`;
+
+items = splitUpdateIntoItems(DOCUMENT);
+eq('one item, not nine', items.length, 1);
+eq('her words, whole and untouched', items[0].content, DOCUMENT);
+eq('titled by the heading, without the bold markers', items[0].title, 'עדכון והנחיה – נוהל לדוגמה');
+truthy('the greeting is not an item of its own', !items.some(i => i.content.trim() === 'שלום לכולם,'));
+
+console.log('\n=== the shapes on either side of the line ===');
+eq('a dated list is still split per line',
+  splitUpdateIntoItems('* 15/09/26 — אירוע א\n* 20/09/26 — אירוע ב').length, 2);
+eq('a list under a heading is still split',
+  splitUpdateIntoItems('ספטמבר 2026\n* 15/09/26 — אירוע א\n* 20/09/26 — אירוע ב').length, 2);
+eq('a single dated line is one item, without the bullet marker',
+  splitUpdateIntoItems('* 15/09/26–08/12/26 — קק״צ 94')[0].content, '15/09/26–08/12/26 — קק״צ 94');
+eq('a short real update stays one item',
+  splitUpdateIntoItems('היי\nתחילת קק״צ ב23.9').length, 1);
+eq('two prose paragraphs are one item, not two',
+  splitUpdateIntoItems('עדכון: הטופס מוגש מעכשיו במערכת.\n\nבנוסף, אין צורך בחתימה ידנית.').length, 1);
+eq('prose that happens to mention two dates is still one item',
+  splitUpdateIntoItems('שימו לב: הכנס נדחה.\nהמועד החדש הוא 15/10.\nההרשמה נסגרת ב-01/10.\nפרטים יישלחו בהמשך בהודעה נפרדת.').length, 1);
+
 console.log('\n=== subject identity: dates vary, numbers do not ===');
 eq('same event, different dates -> same subject',
   subjectTokens('קק״צ 94 — 15/09/26–01/12/26'), subjectTokens('15/09/26–08/12/26 — קק״צ 94'));

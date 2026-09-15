@@ -58,15 +58,30 @@ const BULLET = /^\s*(?:[-*•●▪◦]|\d{1,3}[.)])\s+/;
 /**
  * Splits the information into items, in the editor's own words.
  *
- * A bulleted list becomes one item per bullet, because that is how a schedule
- * is kept — "קק״צ 94" and "קק״צ 95" are separate facts and must be matched,
- * and replaced, separately. Anything else is split into paragraphs. A heading
- * directly above a list is carried into each bullet's item so the context is
- * not lost.
+ * A schedule becomes one item per line, because "קק״צ 94" and "קק״צ 95" are
+ * separate facts that have to be matched, and replaced, separately. A heading
+ * directly above such a list is carried into each item so the context is not
+ * lost.
+ *
+ * Anything else stays ONE item. A policy update — a heading, "שלום לכולם,",
+ * numbered sections, a couple of sub-bullets — was being cut at every blank
+ * line, which produced items like "שלום לכולם," and asked the editor to
+ * approve nine fragments none of which was a fact on its own. It also broke
+ * the sentences apart in the knowledge base, so the bot could later quote a
+ * rule without the paragraph that qualifies it. A document is one thing to
+ * decide about and one thing to store.
  */
 export function splitUpdateIntoItems(body: string): UpdateItem[] {
   const text = String(body ?? '').replace(/\r\n/g, '\n').trim();
   if (!text) return [];
+
+  const allLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const entries = allLines.filter(isListEntry).length;
+
+  // Mostly list entries -> a schedule. Otherwise -> a document, kept whole.
+  if (!entries || entries * 2 < allLines.length) {
+    return [{ title: titleFrom(allLines[0] ?? text), content: text }];
+  }
 
   const items: UpdateItem[] = [];
 
@@ -96,8 +111,25 @@ export function splitUpdateIntoItems(body: string): UpdateItem[] {
   return items;
 }
 
+/** A line that reads as an entry in a list: a bullet, a numbered line, or a dated one. */
+function isListEntry(line: string): boolean {
+  return BULLET.test(line) || hasDate(line);
+}
+
+/** DATE_PATTERN is global, so its lastIndex has to be cleared before every test. */
+function hasDate(text: string): boolean {
+  DATE_PATTERN.lastIndex = 0;
+  return DATE_PATTERN.test(text);
+}
+
 function titleFrom(line: string): string {
-  const clean = line.replace(BULLET, '').trim();
+  // The content keeps her formatting exactly; the title is what the bot matches
+  // and displays, so WhatsApp's bold markers around a heading come off here.
+  const clean = line
+    .replace(BULLET, '')
+    .replace(/^[*_~"״'׳\s]+/, '')
+    .replace(/[*_~"״'׳\s]+$/, '')
+    .trim();
   return clean.length > 90 ? `${clean.slice(0, 87)}…` : clean;
 }
 
@@ -408,9 +440,15 @@ export function renderPreview(items: ProposedItem[]): string[] {
     blocks.push('אין שינויים — כל המידע כבר קיים במאגר בדיוק כך.');
   } else {
     blocks.push(
-      'איך להמשיך:\n' +
-      '• "מאשרת" — הכל לפי ברירת המחדל\n' +
-      '• או לפי פריטים, למשל: "2 להשאיר", "3 לא להוסיף"',
+      actionable.length === 1
+        // Offering "2 להשאיר" when there is only item 1 reads as if something
+        // is missing from the preview.
+        ? 'איך להמשיך:\n' +
+          '• "מאשרת" — לעדכן\n' +
+          '• "בטל" — לא לשנות כלום'
+        : 'איך להמשיך:\n' +
+          '• "מאשרת" — הכל לפי ברירת המחדל\n' +
+          '• או לפי פריטים, למשל: "2 להשאיר", "3 לא להוסיף"',
     );
   }
 
