@@ -20,10 +20,10 @@ import { getChatbotConfig } from './config';
 import { ConversationManager } from './ConversationManager';
 import { detectIntent } from './intentRouter';
 import { buildSystemPrompt } from './prompts/system';
-import { TOOL_MAP, toolDefinitionsFor } from './tools';
+import { TOOL_MAP, toolDefinitionsFor, pendingInThisConversation } from './tools';
 import { WORKFLOW_BY_ID, toolsForWorkflow, workflowForIntent } from './workflows';
 import { extractHebrewMonth, parseHebrewDate, parseHebrewTime } from './dateParser';
-import { isKnowledgeUpdate } from './knowledgeUpdate';
+import { isKnowledgeUpdate, classifyReply, renderApplySummary } from './knowledgeUpdate';
 import { findSender } from './fyi';
 
 /** Guard against a tool-call loop burning tokens on a single message. */
@@ -123,6 +123,19 @@ export class ChatbotService {
     let conversation = this.conversations.getOrCreate(accountId, phoneNumber, now);
     this.conversations.appendTurn(conversation.id, { role: 'user', content: text });
 
+    // An editor answering a knowledge-update preview is handled here, before
+    // the model is involved. Left to the model, "מאשרת" was sometimes answered
+    // by proposing again — and since proposing reads her latest message, the
+    // word "מאשרת" itself became the update, replacing the one she approved,
+    // and every further "מאשרת" repeated it. Approve and cancel are unambiguous
+    // and need no judgement; per-item decisions still go to the model.
+    try {
+      const answered = await this.answerPendingUpdate({ accountId, phoneNumber, text, conversation, config, now, deliver });
+      if (answered) return answered;
+    } catch (e: any) {
+      console.error('📚 Could not act on the reply to a knowledge update:', e?.message ?? e);
+    }
+
     // Bound every API call. The SDK defaults to a 10-minute timeout with
     // retries, and turns are serialized per contact — so one hung request could
     // park a person's queue for half an hour while they saw only silence.
@@ -219,25 +232,18 @@ export class ChatbotService {
    * The tool-use loop. The model may call tools; this code executes them and
    * feeds real results back, repeating until it produces a text answer.
    */
-  private async runConversation(params: {
-    client: Anthropic;
-    config: ChatbotConfig;
-    conversation: ConversationState;
-    workflow: WorkflowDefinition | null;
-    recentTurns: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** What the tools get to work with. Simulation captures sends instead of performing them. */
+  private buildToolContext(p: {
     accountId: string;
     phoneNumber: string;
+    conversation: ConversationState;
+    config: ChatbotConfig;
     now: Date;
-    /** False in simulation: tools must not reach anyone for real. */
     deliver: boolean;
-    /** Collects what simulation would have sent, for display in the test tab. */
     outbound: Array<{ to: string; message: string }>;
-    extraContext?: string;
-  }): Promise<string> {
-    const { client, config, workflow, recentTurns, accountId, phoneNumber, now, deliver, outbound, extraContext } = params;
-    let conversation = params.conversation;
-
-    const ctx: WorkflowContext = {
+  }): WorkflowContext {
+    const { accountId, phoneNumber, conversation, config, now, deliver, outbound } = p;
+    return {
       accountId,
       phoneNumber,
       conversation,
@@ -282,6 +288,73 @@ export class ChatbotService {
       },
       now,
     };
+  }
+
+  /**
+   * Approves or cancels the update waiting for this editor, if her message is
+   * plainly one of those. Returns null for anything else, which then goes
+   * through the normal pipeline.
+   */
+  private async answerPendingUpdate(p: {
+    accountId: string;
+    phoneNumber: string;
+    text: string;
+    conversation: ConversationState;
+    config: ChatbotConfig;
+    now: Date;
+    deliver: boolean;
+  }): Promise<HandleResult | null> {
+    if (!findSender(p.phoneNumber, p.config.knowledgeEditors)) return null;
+    const kind = classifyReply(p.text);
+    if (kind !== 'approve' && kind !== 'cancel') return null;
+
+    const outbound: Array<{ to: string; message: string }> = [];
+    const ctx = this.buildToolContext({ ...p, outbound });
+    if (!pendingInThisConversation(ctx)) return null;
+
+    const result: any = await TOOL_MAP.applyKnowledgeUpdate.execute(
+      kind === 'cancel' ? { cancel: true } : { acceptDefaultsForRest: true },
+      ctx,
+    );
+    if (!result?.ok) console.warn('📚 Approved update could not be applied:', result?.error);
+
+    const reply = result?.ok
+      ? renderApplySummary(result.data)
+      : 'לא הצלחתי לעדכן את המאגר, ולא שיניתי כלום. אפשר לשלוח את המידע שוב.';
+
+    this.conversations.appendTurn(p.conversation.id, { role: 'assistant', content: reply });
+    // Done with the update; the next message starts from a clean slate rather
+    // than being read as more of it.
+    this.conversations.clearWorkflow(p.conversation.id);
+    if (p.deliver) await this.sendWhatsApp(p.accountId, p.phoneNumber, reply);
+
+    return {
+      handled: true,
+      reply,
+      intent: 'KNOWLEDGE_UPDATE',
+      ...(p.deliver ? {} : { wouldHaveSent: outbound }),
+    };
+  }
+
+  private async runConversation(params: {
+    client: Anthropic;
+    config: ChatbotConfig;
+    conversation: ConversationState;
+    workflow: WorkflowDefinition | null;
+    recentTurns: Array<{ role: 'user' | 'assistant'; content: string }>;
+    accountId: string;
+    phoneNumber: string;
+    now: Date;
+    /** False in simulation: tools must not reach anyone for real. */
+    deliver: boolean;
+    /** Collects what simulation would have sent, for display in the test tab. */
+    outbound: Array<{ to: string; message: string }>;
+    extraContext?: string;
+  }): Promise<string> {
+    const { client, config, workflow, recentTurns, accountId, phoneNumber, now, deliver, outbound, extraContext } = params;
+    let conversation = params.conversation;
+
+    const ctx = this.buildToolContext({ accountId, phoneNumber, conversation, config, now, deliver, outbound });
 
     const tools = toolDefinitionsFor(toolsForWorkflow(workflow));
 

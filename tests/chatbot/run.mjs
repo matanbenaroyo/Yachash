@@ -22,7 +22,7 @@ const hasLiveDb = existsSync(liveDb);
 // Suites that read the live database or copy it.
 const NEEDS_LIVE_DB = new Set([
   'search.test.ts', 'registry-db.test.ts',
-  'knowledge-update.test.ts', 'knowledge-apply.test.ts', 'knowledge-tools.test.ts',
+  'knowledge-update.test.ts', 'knowledge-apply.test.ts', 'knowledge-tools.test.ts', 'knowledge-loop.test.ts',
 ]);
 
 const suites = readdirSync(here).filter(f => f.endsWith('.test.ts')).sort();

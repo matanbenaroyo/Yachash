@@ -25,9 +25,11 @@ import {
   proposeItems,
   resolveDecisions,
   renderPreview,
+  classifyReply,
   type ExistingEntry,
 } from '../knowledgeUpdate';
 import { createProposal, getPendingProposal, applyProposal } from '../knowledgeUpdateStore';
+import { ConversationManager } from '../ConversationManager';
 import {
   FYI_FORMAT,
   findSender,
@@ -775,14 +777,30 @@ function latestUserMessage(ctx: WorkflowContext): string {
   }
 }
 
+/**
+ * The update waiting for this editor's answer, if it was shown in THIS
+ * conversation. One left over from a conversation that has since gone stale is
+ * not something a "מאשרת" today can be about, so it is retired instead.
+ */
+export function pendingInThisConversation(ctx: WorkflowContext) {
+  const pending = getPendingProposal(ctx.db, ctx.phoneNumber);
+  if (!pending) return null;
+  if (pending.conversationId !== ctx.conversation.id) {
+    ctx.db.prepare(`UPDATE chatbot_knowledge_updates SET status='expired' WHERE id=?`).run(pending.id);
+    return null;
+  }
+  return pending;
+}
+
 const proposeKnowledgeUpdate: ChatbotTool = {
   name: 'proposeKnowledgeUpdate',
   description:
-    'Step 1 of updating the knowledge base from new information an authorised editor sent. Takes no ' +
+    'Step 1 of updating the knowledge base, ONLY when her latest message IS new information. Takes no ' +
     'input — it reads her latest message itself, so NEVER retype or summarise the information. It splits ' +
     'it into items, compares each with the existing knowledge, and SENDS HER THE FULL PREVIEW DIRECTLY. ' +
     'Nothing is changed yet. After it returns, reply with one short line asking her to approve or decide ' +
-    'per item — do not repeat the preview.',
+    'per item — do not repeat the preview. NEVER call this for a reply to a preview ("מאשרת", "כן", ' +
+    '"בטל", "2 להשאיר") — that is applyKnowledgeUpdate.',
   input_schema: { type: 'object', properties: {}, required: [] },
   execute: async (_input, ctx) => {
     const editor = findSender(ctx.phoneNumber, ctx.config.knowledgeEditors);
@@ -791,9 +809,34 @@ const proposeKnowledgeUpdate: ChatbotTool = {
     }
 
     const message = latestUserMessage(ctx);
+    const pending = pendingInThisConversation(ctx);
+
+    // The tool reads her latest message, so calling it on a reply turns the
+    // reply into the update: "תציע לי" and then "מאשרת" were each stored as
+    // knowledge, the second one replacing the real update she had just
+    // approved, over and over. A reply is never information.
+    const reply = classifyReply(message);
+    if (reply) {
+      return {
+        ok: false,
+        error: pending
+          ? 'ההודעה האחרונה שלה היא תשובה לתצוגה המקדימה, לא מידע חדש. אל תקראי ל-proposeKnowledgeUpdate. ' +
+            (reply === 'chatter'
+              ? 'שאלי אותה בשורה אחת אם לעדכן כפי שהוצג.'
+              : 'קראי ל-applyKnowledgeUpdate לפי תשובתה.')
+          : 'ההודעה האחרונה שלה היא תשובה ולא מידע חדש, ואין עדכון שממתין לאישור. בקשי ממנה לשלוח את המידע עצמו.',
+      };
+    }
+
     const body = extractUpdateBody(message);
     if (!body) {
       return { ok: false, error: 'לא נמצא תוכן לעדכון. בקשי ממנה לשלוח את המידע עצמו.' };
+    }
+    if (pending && extractUpdateBody(pending.sourceText) === body) {
+      return {
+        ok: false,
+        error: 'התצוגה המקדימה של המידע הזה כבר נשלחה אליה וממתינה לתשובתה. אל תשלחי אותה שוב — בקשי את אישורה.',
+      };
     }
 
     const items = splitUpdateIntoItems(body);
@@ -812,6 +855,20 @@ const proposeKnowledgeUpdate: ChatbotTool = {
       .all() as ExistingEntry[];
     const proposed = proposeItems(items, existing);
 
+    // The preview is sent from here, built in code. Letting the model relay it
+    // would mean she approves a paraphrase of what will actually be written.
+    const preview = renderPreview(proposed);
+    for (const chunk of preview) {
+      await ctx.sendWhatsApp(ctx.phoneNumber, chunk);
+    }
+
+    // And it goes into the conversation. Sent only from here, it was invisible
+    // on the next turn: the model saw its own "אפשר לאשר?" and no preview, and
+    // answered her "מאשרת" by proposing again.
+    new ConversationManager(ctx.db).appendTurn(ctx.conversation.id, { role: 'assistant', content: preview.join('\n\n') });
+
+    // Taken after the preview is recorded, so only a message she sends after
+    // this counts as her answer to it.
     createProposal(ctx.db, {
       conversationId: ctx.conversation.id,
       requesterPhone: ctx.phoneNumber,
@@ -820,12 +877,6 @@ const proposeKnowledgeUpdate: ChatbotTool = {
       items: proposed,
       preparedTurn: conversationTurn(ctx),
     });
-
-    // The preview is sent from here, built in code. Letting the model relay it
-    // would mean she approves a paraphrase of what will actually be written.
-    for (const chunk of renderPreview(proposed)) {
-      await ctx.sendWhatsApp(ctx.phoneNumber, chunk);
-    }
 
     const actionable = proposed.filter(p => p.kind !== 'unchanged').length;
     return {
@@ -875,7 +926,7 @@ const applyKnowledgeUpdate: ChatbotTool = {
     const editor = findSender(ctx.phoneNumber, ctx.config.knowledgeEditors);
     if (!editor) return { ok: false, error: 'המספר הזה אינו מורשה. לא שונה דבר.' };
 
-    const pending = getPendingProposal(ctx.db, ctx.phoneNumber);
+    const pending = pendingInThisConversation(ctx);
     if (!pending) return { ok: false, error: 'אין עדכון שממתין לאישור. אפשר לשלוח "להלן מידע חדש" מחדש.' };
 
     if (input.cancel === true) {

@@ -43,9 +43,100 @@ export function isKnowledgeUpdate(text: string): boolean {
   return UPDATE_TRIGGER.test(String(text ?? ''));
 }
 
-/** The information itself, with the trigger phrase removed. */
+/**
+ * The information itself: the trigger phrase, an opening line that only
+ * introduces what follows, and quotation marks around the whole thing removed.
+ *
+ * Editors write "היי עדכון מידע חדש:" or "כן גם זה:" and then paste the text,
+ * often in quotes. All of that used to go into the knowledge base verbatim, so
+ * an entry was titled "היי עדכון מידע חדש:" and its content opened with a stray
+ * quote — searchable by nothing anyone would ask.
+ */
 export function extractUpdateBody(text: string): string {
-  return String(text ?? '').replace(UPDATE_TRIGGER, '').trim();
+  let body = String(text ?? '').replace(/\r\n/g, '\n').replace(UPDATE_TRIGGER, '').trim();
+
+  const lines = body.split('\n');
+  if (lines.length > 1 && isPreambleLine(lines[0])) {
+    body = lines.slice(1).join('\n').trim();
+  }
+
+  return stripWrappingQuotes(body);
+}
+
+/**
+ * Words that introduce an update rather than being part of it. A first line
+ * made only of these is dropped; a first line with anything else in it — "לוח
+ * אירועים ספטמבר:", "עדכון לו״ז קק״צ:" — is a heading and stays, because the
+ * items below it need it for context.
+ */
+const PREAMBLE_WORDS = new Set([
+  'היי', 'הי', 'שלום', 'אהלן', 'בוקר', 'ערב', 'טוב', 'כן', 'אוקיי', 'אוקי', 'סבבה',
+  'גם', 'זה', 'זאת', 'אלה', 'אלו', 'הנה', 'להלן', 'עוד', 'בבקשה', 'תודה',
+  'עדכון', 'עדכונים', 'מידע', 'חדש', 'חדשה', 'חדשים', 'נוסף', 'נוספת',
+  'תוסיף', 'תוסיפי', 'להוסיף', 'תעדכן', 'תעדכני', 'לעדכן', 'למאגר', 'במאגר', 'מאגר',
+  'את', 'של', 'על', 'הבא', 'הבאה', 'הבאים',
+]);
+
+function isPreambleLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!/[:：]$/.test(trimmed) || trimmed.length > 40) return false;
+  const words = trimmed
+    .replace(/[:：,.!?"'״׳“”\-–—]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  return words.length > 0 && words.every(w => PREAMBLE_WORDS.has(w));
+}
+
+const QUOTE_CHARS = '"“”„״\'';
+
+/**
+ * Removes quotation marks around the entire text. A quote between two letters
+ * is gershayim (קק"צ, ע”י — phones type it curly) and does not count, otherwise
+ * a pasted abbreviation would stop the outer quotes from being recognised.
+ */
+function stripWrappingQuotes(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length < 3) return trimmed;
+  if (!QUOTE_CHARS.includes(trimmed[0]) || !QUOTE_CHARS.includes(trimmed[trimmed.length - 1])) return trimmed;
+
+  const inner = trimmed.slice(1, -1);
+  const unexplainedQuotes = inner
+    .replace(/(\p{L})["״“”](\p{L})/gu, '$1$2')
+    .split('')
+    .filter(ch => ch === '"' || ch === '“' || ch === '”' || ch === '„').length;
+  return unexplainedQuotes === 0 ? inner.trim() : trimmed;
+}
+
+export type ReplyKind = 'approve' | 'cancel' | 'decision' | 'chatter';
+
+const APPROVE = new RegExp(
+  '^(?:כן[\\s,]*)?(?:אני\\s+)?' +
+  '(?:מאשר(?:ת|ים)?|מאושר(?:ת)?|אישור|אשר(?:י)?|מאשרת?\\s+(?:את\\s+)?הכו?ל|כן|אוקיי?|ok|סבבה|יאללה|בסדר|👍|✅|👌)' +
+  '(?:[\\s,]*(?:תודה|רבה))*$',
+  'i',
+);
+const CANCEL = /^(?:בטל(?:י)?|ביטול|תבטל(?:י)?|לא|לא לעדכן|לא תודה|עזוב(?:י)?|לא צריך)$/;
+const DECISION = /^\d{1,2}\s*[-–:]?\s*(?:להשאיר|לגרוס|להחליף|להוסיף|לא\s+להוסיף|לדלג|לא)(?:[\s,]+\d{1,2}\s*[-–:]?\s*(?:להשאיר|לגרוס|להחליף|להוסיף|לא\s+להוסיף|לדלג|לא))*$/;
+const CHATTER = /^(?:תציע(?:י)?(?:\s+לי)?|מעולה|אחלה|יופי|מה\s+את(?:ה)?\s+מציע(?:ה)?|תודה(?:\s+רבה)?|מה\s+זה|לא\s+הבנתי|רגע|שנייה|\?+)$/;
+
+/**
+ * What a short message is, when it is an answer rather than information.
+ *
+ * Returns null for anything that could be an update in its own right —
+ * "תחילת קק״צ ב23.9" is sixteen characters and real.
+ */
+export function classifyReply(text: string): ReplyKind | null {
+  const normalised = String(text ?? '')
+    .trim()
+    .replace(/[.!…]+$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalised || normalised.includes('\n') || normalised.length > 40) return null;
+  if (APPROVE.test(normalised)) return 'approve';
+  if (CANCEL.test(normalised)) return 'cancel';
+  if (DECISION.test(normalised)) return 'decision';
+  if (CHATTER.test(normalised)) return 'chatter';
+  return null;
 }
 
 export interface UpdateItem {
@@ -465,4 +556,29 @@ export function renderPreview(items: ProposedItem[]): string[] {
   }
   if (current) chunks.push(current);
   return chunks;
+}
+
+/** What an editor is told after her reply was acted on, built here rather than by the model. */
+export function renderApplySummary(
+  outcome:
+    | { cancelled: true }
+    | { added: number; replaced: number; kept: number; skipped: number; summariesUpdated: number; stale: number[] },
+): string {
+  if ('cancelled' in outcome) return 'בוטל ✅ לא שיניתי כלום במאגר.';
+
+  const count = (n: number, one: string, many: string) => (n === 1 ? one : `${n} ${many}`);
+  const parts: string[] = [];
+  if (outcome.added) parts.push(count(outcome.added, 'נוסף פריט חדש אחד', 'פריטים חדשים נוספו'));
+  if (outcome.replaced) parts.push(count(outcome.replaced, 'פריט אחד הוחלף במידע החדש', 'פריטים הוחלפו במידע החדש'));
+  if (outcome.summariesUpdated) parts.push(count(outcome.summariesUpdated, 'עודכן גם סיכום אחד', 'סיכומים עודכנו גם כן'));
+  if (outcome.kept) parts.push(count(outcome.kept, 'פריט אחד נשאר כמו שהיה', 'פריטים נשארו כמו שהיו'));
+
+  const lines = [parts.length ? `עודכן ✅ ${parts.join(', ')}.` : 'לא היה מה לשנות — הכל כבר קיים במאגר.'];
+  if (outcome.stale.length) {
+    lines.push(
+      `⚠️ ${outcome.stale.length === 1 ? `פריט ${outcome.stale[0]} לא עודכן` : `פריטים ${outcome.stale.join(', ')} לא עודכנו`} ` +
+      'כי המידע במאגר השתנה מאז התצוגה המקדימה. אפשר לשלוח אותם שוב.',
+    );
+  }
+  return lines.join('\n');
 }
