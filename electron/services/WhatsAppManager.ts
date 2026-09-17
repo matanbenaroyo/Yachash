@@ -260,6 +260,15 @@ export class WhatsAppManager {
    * the NEW client it finds under that id.
    */
   private awaitingStartupReady: Set<string> = new Set();
+  /**
+   * Accounts whose saved login is gone and which are showing a QR code. Only a
+   * person with the phone can fix that, so every automatic path leaves them
+   * alone: restarting the client replaces the QR, and one that changes every
+   * minute cannot be scanned. That is how 17.09.2026 went — WhatsApp logged the
+   * device out at 08:11, and for five hours the retry loop tore down each QR
+   * 45 seconds after showing it.
+   */
+  private awaitingQr: Set<string> = new Set();
 
   constructor(dbOrGetter: Database | (() => Database)) {
     this.resolveDb = typeof dbOrGetter === 'function' ? dbOrGetter : () => dbOrGetter;
@@ -471,6 +480,7 @@ export class WhatsAppManager {
     this.readyAccounts.delete(accountId);
     this.connectingAccounts.delete(accountId);
     this.sessionsPaths.delete(accountId);
+    this.awaitingQr.delete(accountId);
 
     if (!client) {
       this.clients.delete(accountId);
@@ -761,6 +771,9 @@ export class WhatsAppManager {
           }
           if (ready) {
             this.initProgress.completed++;
+          } else if (this.awaitingQr.has(account.id)) {
+            // Waiting for a scan; the status is already 'qr' and the client must stay.
+            this.initProgress.failed++;
           } else {
             console.warn(`⚠️ Account ${account.id.substring(0, 8)} never became ready - marking as disconnected`);
             // Explicitly mark as disconnected so the UI reflects the real state
@@ -826,6 +839,13 @@ export class WhatsAppManager {
         return false;
       }
 
+      // Showing a QR is not a stalled connection: the saved login is gone and
+      // someone has to scan. Starting over would only replace the code.
+      if (this.awaitingQr.has(accountId)) {
+        this.announceQrNeeded(accountId);
+        return false;
+      }
+
       console.warn(
         `⚠️ ${accountId} authenticated but not ready within ${READY_ATTEMPT_TIMEOUT_MS / 1000}s ` +
         `(attempt ${attempt}/${attempts})${attempt < attempts ? ' - starting over' : ''}`,
@@ -839,6 +859,16 @@ export class WhatsAppManager {
       if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, RETRY_GAP_MS));
     }
     return false;
+  }
+
+  /** Says, once per account per cooldown, that a person has to scan a QR. */
+  private announceQrNeeded(accountId: string): void {
+    console.warn(`📱 ${accountId} is logged out and showing a QR code - leaving it up for a scan, not retrying`);
+    this.healthReporter?.alert(
+      `needs-qr:${accountId}`,
+      'וואטסאפ ניתק את הבוט וצריך לסרוק QR מחדש. עד אז הבוט לא מקבל הודעות.\n\n' +
+      'לפתוח את Yachash ← חשבונות וואטסאפ ← לסרוק את הקוד עם הטלפון של הבוט (מכשירים מקושרים).',
+    ).catch(() => undefined);
   }
 
   async connectAccount(accountId: string, proxy?: ProxyConfig, pairingMethod: 'qr' | 'code' = 'qr'): Promise<void> {
@@ -1042,6 +1072,7 @@ export class WhatsAppManager {
         }
 
         console.log('📱 QR code received, generating data URL...');
+        this.awaitingQr.add(accountId);
         const qrDataURL = await QRCode.toDataURL(qr);
         console.log('✅ QR code generated');
 
@@ -1280,6 +1311,7 @@ export class WhatsAppManager {
         }
 
         console.log('✅ Authenticated');
+        this.awaitingQr.delete(accountId);
 
         (client as any).sendSeen = async () => {};
         console.log('✅ sendSeen disabled on client');
@@ -1540,6 +1572,7 @@ export class WhatsAppManager {
       for (const [accountId, client] of Array.from(this.clients.entries())) {
         if (this.connectingAccounts.has(accountId)) continue; // mid-connect, not yet its business
         if (this.awaitingStartupReady.has(accountId)) continue; // the startup restore owns it until its timeout
+        if (this.awaitingQr.has(accountId)) continue; // waiting for a person to scan; a rebuild would replace the QR
 
         let state: string | null = null;
         try {
@@ -1655,6 +1688,7 @@ export class WhatsAppManager {
 
     for (const row of rows) {
       if (this.clients.has(row.id) || this.connectingAccounts.has(row.id)) continue;
+      if (this.awaitingQr.has(row.id)) continue;
       if (!fs.existsSync(this.getSessionPath(row.id))) continue;
 
       const attempts = (this.dormantRetries.get(row.id) ?? 0) + 1;
@@ -1672,6 +1706,11 @@ export class WhatsAppManager {
         if (await this.connectUntilReady(row.id)) {
           this.dormantRetries.delete(row.id);
           console.log(`✅ Dormant account ${row.id} reconnected`);
+          continue;
+        }
+        // Logged out: the QR is up and announced. Retrying would replace it.
+        if (this.awaitingQr.has(row.id)) {
+          this.dormantRetries.delete(row.id);
           continue;
         }
         console.warn(`⚠️ ${row.id} reconnected but never became ready (attempt ${attempts})`);
