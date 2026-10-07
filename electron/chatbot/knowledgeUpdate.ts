@@ -77,14 +77,46 @@ const PREAMBLE_WORDS = new Set([
   'את', 'של', 'על', 'הבא', 'הבאה', 'הבאים',
 ]);
 
+/**
+ * A first line that only introduces what follows.
+ *
+ * The colon is not required: editors open with "מידע חדש", "ערב טוב 😌" or
+ * "היי" on a line of their own, and those became the entry's title — so the
+ * knowledge base held entries called "מידע חדש" that no question would ever
+ * match. What protects a real heading ("לוח אירועים ספטמבר") is the word list,
+ * not the punctuation: every word has to be one of these.
+ */
 function isPreambleLine(line: string): boolean {
   const trimmed = line.trim();
-  if (!/[:：]$/.test(trimmed) || trimmed.length > 40) return false;
+  if (trimmed.length > 40) return false;
   const words = trimmed
+    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, ' ')
     .replace(/[:：,.!?"'״׳“”\-–—]/g, ' ')
     .split(/\s+/)
     .filter(Boolean);
   return words.length > 0 && words.every(w => PREAMBLE_WORDS.has(w));
+}
+
+/**
+ * "Put it back" — the way out now that information is stored on arrival
+ * instead of after an approval.
+ */
+const UNDO_REQUEST = new RegExp(
+  '^(?:' +
+  '(?:תבטל(?:י)?|בטל(?:י)?|ביטול|תחזיר(?:י)?|החזר(?:י)?|תמחק(?:י)?|מחק(?:י)?)' +
+  '(?:\\s+(?:את\\s+)?(?:ה)?(?:עדכון|שינוי|מידע|זה|הכל|אחרון|אחרונה|קודם|קודמת|ישן)){0,3}' +
+  '|(?:זה\\s+)?(?:לא\\s+נכון|טעות|בטעות)' +
+  ')$',
+);
+
+/** True when an editor is asking to take the last update back out. */
+export function isUndoRequest(text: string): boolean {
+  const normalised = String(text ?? '')
+    .trim()
+    .replace(/[.!…]+$/u, '')
+    .replace(/\s+/g, ' ');
+  if (!normalised || normalised.includes('\n') || normalised.length > 40) return false;
+  return UNDO_REQUEST.test(normalised);
 }
 
 const QUOTE_CHARS = '"“”„״\'';
@@ -556,6 +588,88 @@ export function renderPreview(items: ProposedItem[]): string[] {
   }
   if (current) chunks.push(current);
   return chunks;
+}
+
+/**
+ * What an editor is told after her information was stored.
+ *
+ * Information now goes in when she sends it, so this message is the only place
+ * she sees what actually happened — which means it has to show what was
+ * replaced, in full, not just count it. She approved nothing in advance; she
+ * gets to object afterwards, and "בטל" puts it back.
+ */
+export function renderStoredUpdate(
+  items: ProposedItem[],
+  actions: Map<number, ItemAction>,
+  outcome: { added: number; replaced: number; summariesUpdated: number; stale: number[] },
+): string[] {
+  const blocks: string[] = [];
+  const added = items.filter(i => actions.get(i.number) === 'add' && !outcome.stale.includes(i.number));
+  const replaced = items.filter(i => actions.get(i.number) === 'replace' && !outcome.stale.includes(i.number));
+  const same = items.filter(i => i.kind === 'unchanged');
+
+  blocks.push(
+    `✅ *נכנס למאגר*\n` +
+    [
+      outcome.added ? `${outcome.added} חדש` : '',
+      outcome.replaced ? `${outcome.replaced} עודכן` : '',
+      same.length ? `${same.length} היה כבר` : '',
+    ].filter(Boolean).join(' · '),
+  );
+
+  for (const item of added) {
+    blocks.push(`*חדש:*\n${item.content}`);
+  }
+
+  for (const item of replaced) {
+    const old = item.matches[0];
+    const alsoIn = item.mentions.length
+      ? `\n_(עודכן גם ב: ${Array.from(new Set(item.mentions.map(m => m.entryTitle))).join(', ')})_`
+      : '';
+    blocks.push(
+      `*הוחלף:*\n` +
+      `היה: ${old ? old.content : '—'}\n\n` +
+      `עכשיו: ${item.content}${alsoIn}`,
+    );
+  }
+
+  if (same.length) {
+    blocks.push(`ℹ️ ${same.length === 1 ? 'פריט אחד היה' : `${same.length} פריטים היו`} זהים למה שקיים — לא שונה דבר.`);
+  }
+
+  if (outcome.stale.length) {
+    blocks.push(
+      `⚠️ ${outcome.stale.length === 1 ? `פריט ${outcome.stale[0]} לא נכנס` : `פריטים ${outcome.stale.join(', ')} לא נכנסו`} ` +
+      'כי המידע במאגר השתנה בדיוק באותו רגע. אפשר לשלוח אותם שוב.',
+    );
+  }
+
+  blocks.push('אם משהו מזה לא נכון — אפשר לכתוב *"בטל"* ואחזיר את מה שהיה.');
+
+  const chunks: string[] = [];
+  let current = '';
+  for (const block of blocks) {
+    const next = current ? `${current}\n\n${block}` : block;
+    if (next.length > PREVIEW_CHUNK_CHARS && current) {
+      chunks.push(current);
+      current = block;
+    } else {
+      current = next;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+/** What an editor is told after an update was taken back out. */
+export function renderUndoSummary(outcome: { restored: number; removed: number; summariesRestored: number }): string {
+  const parts: string[] = [];
+  if (outcome.removed) parts.push(outcome.removed === 1 ? 'פריט אחד הוסר' : `${outcome.removed} פריטים הוסרו`);
+  if (outcome.restored) parts.push(outcome.restored === 1 ? 'פריט אחד חזר למה שהיה' : `${outcome.restored} פריטים חזרו למה שהיו`);
+  if (outcome.summariesRestored) parts.push('גם הסיכומים הוחזרו');
+  return parts.length
+    ? `בוטל ✅ ${parts.join(', ')}.`
+    : 'לא מצאתי עדכון אחרון לבטל. אם משהו במאגר לא נכון — אפשר לשלוח את הנוסח הנכון.';
 }
 
 /** What an editor is told after her reply was acted on, built here rather than by the model. */

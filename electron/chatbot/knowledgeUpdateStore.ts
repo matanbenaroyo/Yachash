@@ -40,7 +40,7 @@ export function getPendingProposal(db: any, requesterPhone: string): StoredPropo
     .prepare(
       `SELECT * FROM chatbot_knowledge_updates
        WHERE requester_phone = ? AND status = 'pending'
-       ORDER BY created_at DESC LIMIT 1`,
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
     .get(requesterPhone) as any;
   if (!row) return null;
@@ -156,6 +156,100 @@ export function applyProposal(
        SET status = 'applied', decisions = ?, undo = ?, applied_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
     ).run(JSON.stringify(Object.fromEntries(actions)), JSON.stringify(undo), proposal.id);
+  });
+
+  run();
+  return result;
+}
+
+/**
+ * The last update this editor's information actually went into, for taking it
+ * back out. Scoped to the conversation she is in, so "בטל" in a chat today
+ * cannot undo something from a different thread.
+ */
+export function getLastAppliedProposal(
+  db: any,
+  requesterPhone: string,
+  conversationId: string | null,
+): (StoredProposal & { undo: any; appliedAt: string | null }) | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM chatbot_knowledge_updates
+       WHERE requester_phone = ? AND status = 'applied'
+         AND (? IS NULL OR conversation_id = ?)
+       ORDER BY applied_at DESC, created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(requesterPhone, conversationId, conversationId) as any;
+  if (!row) return null;
+
+  const parse = (json: any, fallback: any) => {
+    try { return json ? JSON.parse(json) : fallback; } catch { return fallback; }
+  };
+
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    requesterPhone: row.requester_phone,
+    requesterName: row.requester_name,
+    sourceText: row.source_text,
+    items: parse(row.items, []),
+    preparedTurn: Number(row.prepared_turn ?? 0),
+    status: row.status,
+    undo: parse(row.undo, { replacedRows: [], addedRowIds: [], mentionLines: [] }),
+    appliedAt: row.applied_at ?? null,
+  };
+}
+
+export interface UndoResult {
+  restored: number;
+  removed: number;
+  summariesRestored: number;
+}
+
+/**
+ * Puts an applied update back, from what was recorded when it went in.
+ *
+ * This is what makes storing information on arrival safe: nothing is approved
+ * in advance, so there has to be a way back that does not involve restoring a
+ * database backup. Rows that were added are deleted; rows that were overwritten
+ * get their previous title and content; lines rewritten inside month summaries
+ * get their previous text.
+ */
+export function undoProposal(db: any, proposal: { id: string; undo: any }): UndoResult {
+  const result: UndoResult = { restored: 0, removed: 0, summariesRestored: 0 };
+  const undo = proposal.undo ?? {};
+
+  const getRow = db.prepare('SELECT id, title, content FROM chatbot_knowledge WHERE id = ?');
+  const updateRow = db.prepare(
+    'UPDATE chatbot_knowledge SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+  );
+  const deleteRow = db.prepare('DELETE FROM chatbot_knowledge WHERE id = ?');
+
+  const run = db.transaction(() => {
+    for (const id of undo.addedRowIds ?? []) {
+      deleteRow.run(id);
+      result.removed++;
+    }
+
+    for (const previous of undo.replacedRows ?? []) {
+      if (!getRow.get(previous.id)) continue;   // gone since; nothing to restore onto
+      updateRow.run(previous.title, previous.content, previous.id);
+      result.restored++;
+    }
+
+    // Summary lines are restored after the rows, because a restored row may be
+    // the summary itself and would otherwise overwrite this.
+    for (const mention of undo.mentionLines ?? []) {
+      const current = getRow.get(mention.entryId) as any;
+      if (!current) continue;
+      const lines = String(current.content).split('\n');
+      if (mention.lineIndex >= lines.length) continue;
+      lines[mention.lineIndex] = mention.line;
+      updateRow.run(current.title, lines.join('\n'), mention.entryId);
+      result.summariesRestored++;
+    }
+
+    db.prepare(`UPDATE chatbot_knowledge_updates SET status = 'undone' WHERE id = ?`).run(proposal.id);
   });
 
   run();

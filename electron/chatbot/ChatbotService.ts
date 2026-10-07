@@ -20,10 +20,11 @@ import { getChatbotConfig } from './config';
 import { ConversationManager } from './ConversationManager';
 import { detectIntent } from './intentRouter';
 import { buildSystemPrompt } from './prompts/system';
-import { TOOL_MAP, toolDefinitionsFor, pendingInThisConversation } from './tools';
+import { TOOL_MAP, toolDefinitionsFor, pendingRelayInThisConversation } from './tools';
 import { WORKFLOW_BY_ID, toolsForWorkflow, workflowForIntent } from './workflows';
 import { extractHebrewMonth, parseHebrewDate, parseHebrewTime } from './dateParser';
-import { isKnowledgeUpdate, classifyReply, renderApplySummary } from './knowledgeUpdate';
+import { isKnowledgeUpdate, classifyReply, isUndoRequest, renderUndoSummary } from './knowledgeUpdate';
+import { toLocalIsraeliPhone } from './phone';
 import { findSender } from './fyi';
 
 /** Guard against a tool-call loop burning tokens on a single message. */
@@ -123,17 +124,15 @@ export class ChatbotService {
     let conversation = this.conversations.getOrCreate(accountId, phoneNumber, now);
     this.conversations.appendTurn(conversation.id, { role: 'user', content: text });
 
-    // An editor answering a knowledge-update preview is handled here, before
-    // the model is involved. Left to the model, "מאשרת" was sometimes answered
-    // by proposing again — and since proposing reads her latest message, the
-    // word "מאשרת" itself became the update, replacing the one she approved,
-    // and every further "מאשרת" repeated it. Approve and cancel are unambiguous
-    // and need no judgement; per-item decisions still go to the model.
+    // An authorised person's "כן" or "בטל" is acted on here, before the model
+    // is involved. Twice now, leaving it to the model produced a loop instead
+    // of an action: it answered "מאשרת" by preparing the same thing again, and
+    // nothing was ever sent or stored. These two words need no judgement.
     try {
-      const answered = await this.answerPendingUpdate({ accountId, phoneNumber, text, conversation, config, now, deliver });
+      const answered = await this.answerAuthorisedReply({ accountId, phoneNumber, text, conversation, config, now, deliver });
       if (answered) return answered;
     } catch (e: any) {
-      console.error('📚 Could not act on the reply to a knowledge update:', e?.message ?? e);
+      console.error('📨 Could not act on an authorised reply:', e?.message ?? e);
     }
 
     // Bound every API call. The SDK defaults to a 10-minute timeout with
@@ -291,11 +290,21 @@ export class ChatbotService {
   }
 
   /**
-   * Approves or cancels the update waiting for this editor, if her message is
-   * plainly one of those. Returns null for anything else, which then goes
-   * through the normal pipeline.
+   * Acts on a plain reply from an authorised person, in code.
+   *
+   * Two things are handled here and nowhere else:
+   *
+   *  - "כן" to a message waiting to be relayed. The model used to own this, and
+   *    on 06.10.2026 it answered each "כן" by preparing the same message again,
+   *    which reset the confirmation it was waiting for. The requester confirmed
+   *    five times and her message was never sent.
+   *
+   *  - "בטל" after information was stored. Information from an editor goes
+   *    straight into the knowledge base now, so this is the way back out.
+   *
+   * Anything else returns null and goes through the normal pipeline.
    */
-  private async answerPendingUpdate(p: {
+  private async answerAuthorisedReply(p: {
     accountId: string;
     phoneNumber: string;
     text: string;
@@ -304,36 +313,46 @@ export class ChatbotService {
     now: Date;
     deliver: boolean;
   }): Promise<HandleResult | null> {
-    if (!findSender(p.phoneNumber, p.config.knowledgeEditors)) return null;
     const kind = classifyReply(p.text);
-    if (kind !== 'approve' && kind !== 'cancel') return null;
-
     const outbound: Array<{ to: string; message: string }> = [];
     const ctx = this.buildToolContext({ ...p, outbound });
-    if (!pendingInThisConversation(ctx)) return null;
 
-    const result: any = await TOOL_MAP.applyKnowledgeUpdate.execute(
-      kind === 'cancel' ? { cancel: true } : { acceptDefaultsForRest: true },
-      ctx,
-    );
-    if (!result?.ok) console.warn('📚 Approved update could not be applied:', result?.error);
-
-    const reply = result?.ok
-      ? renderApplySummary(result.data)
-      : 'לא הצלחתי לעדכן את המאגר, ולא שיניתי כלום. אפשר לשלוח את המידע שוב.';
-
-    this.conversations.appendTurn(p.conversation.id, { role: 'assistant', content: reply });
-    // Done with the update; the next message starts from a clean slate rather
-    // than being read as more of it.
-    this.conversations.clearWorkflow(p.conversation.id);
-    if (p.deliver) await this.sendWhatsApp(p.accountId, p.phoneNumber, reply);
-
-    return {
-      handled: true,
-      reply,
-      intent: 'KNOWLEDGE_UPDATE',
-      ...(p.deliver ? {} : { wouldHaveSent: outbound }),
+    const respond = async (reply: string, intent: 'MESSAGE_RELAY' | 'KNOWLEDGE_UPDATE'): Promise<HandleResult> => {
+      this.conversations.appendTurn(p.conversation.id, { role: 'assistant', content: reply });
+      // Done with it; the next message starts clean rather than being read as
+      // more of the same request.
+      this.conversations.clearWorkflow(p.conversation.id);
+      if (p.deliver) await this.sendWhatsApp(p.accountId, p.phoneNumber, reply);
+      return { handled: true, reply, intent, ...(p.deliver ? {} : { wouldHaveSent: outbound }) };
     };
+
+    // A message waiting to go out, and the person who asked for it saying yes.
+    if (kind === 'approve' || kind === 'cancel') {
+      const relay = findSender(p.phoneNumber, p.config.fyiSenders) ? pendingRelayInThisConversation(ctx) : null;
+      if (relay) {
+        if (kind === 'cancel') {
+          ctx.db.prepare(`UPDATE chatbot_relays SET status='cancelled' WHERE id=?`).run(relay.id);
+          return respond('בוטל ✅ לא שלחתי כלום.', 'MESSAGE_RELAY');
+        }
+
+        const result: any = await TOOL_MAP.confirmRelay.execute({}, ctx);
+        if (result?.ok) {
+          const to = toLocalIsraeliPhone(String(relay.target_phone));
+          return respond(`נשלח ל-${to} ✅`, 'MESSAGE_RELAY');
+        }
+        console.warn('📨 Confirmed relay could not be sent:', result?.error);
+        return respond(result?.error ?? 'לא הצלחתי לשלוח את ההודעה.', 'MESSAGE_RELAY');
+      }
+    }
+
+    // An editor taking the last stored update back out.
+    if (findSender(p.phoneNumber, p.config.knowledgeEditors) && (kind === 'cancel' || isUndoRequest(p.text))) {
+      const result: any = await TOOL_MAP.undoKnowledgeUpdate.execute({}, ctx);
+      if (!result?.ok) return null;   // nothing to undo: let the model answer her
+      return respond(renderUndoSummary(result.data), 'KNOWLEDGE_UPDATE');
+    }
+
+    return null;
   }
 
   private async runConversation(params: {

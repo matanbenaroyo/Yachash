@@ -24,11 +24,17 @@ import {
   splitUpdateIntoItems,
   proposeItems,
   resolveDecisions,
-  renderPreview,
+  renderStoredUpdate,
   classifyReply,
   type ExistingEntry,
 } from '../knowledgeUpdate';
-import { createProposal, getPendingProposal, applyProposal } from '../knowledgeUpdateStore';
+import {
+  createProposal,
+  getPendingProposal,
+  applyProposal,
+  getLastAppliedProposal,
+  undoProposal,
+} from '../knowledgeUpdateStore';
 import { ConversationManager } from '../ConversationManager';
 import {
   FYI_FORMAT,
@@ -504,9 +510,46 @@ const prepareRelay: ChatbotTool = {
       };
     }
 
+    const pending = pendingRelayInThisConversation(ctx);
+
+    // Her "כן" is an answer, not a new request. Preparing again on it is what
+    // deadlocked this on 06.10.2026: each reply replaced the pending message
+    // with an identical one prepared in the current turn, confirmRelay then
+    // refused it as "not shown yet", and the bot asked again — five times, and
+    // the message was never sent. An approval is acted on in code now, so
+    // reaching here with one means something went wrong.
+    const replyKind = classifyReply(latestUserMessage(ctx));
+    if (replyKind && pending) {
+      return {
+        ok: false,
+        error:
+          'ההודעה האחרונה שלה היא תשובה לאישור, לא בקשה חדשה. אל תכיני מחדש. ' +
+          (replyKind === 'approve'
+            ? 'קראי ל-confirmRelay.'
+            : replyKind === 'cancel'
+              ? 'אל תשלחי, ואשרי לה שבוטל.'
+              : 'שאלי אותה בשורה אחת אם לשלוח.'),
+      };
+    }
+
+    // The same message, already waiting: keep the one she was shown instead of
+    // replacing it, so its turn stays in the past and a confirmation can land.
+    if (pending && pending.target_phone === target && String(pending.body ?? '') === body
+        && Boolean(pending.media_filename) === Boolean(media)) {
+      return {
+        ok: true,
+        data: {
+          target: toLocalIsraeliPhone(target),
+          body,
+          withImage: Boolean(media),
+          note: 'ההודעה הזו כבר הוצגה לה וממתינה לאישורה. אל תציגי שוב — בקשי אישור בשורה אחת.',
+        },
+      };
+    }
+
     const id = randomUUID();
-    // Anything still pending from this requester is stale the moment a new one
-    // is prepared — otherwise a confirmation could land on the wrong message.
+    // Anything else still pending from this requester is stale the moment a new
+    // one is prepared — otherwise a confirmation could land on the wrong message.
     ctx.db
       .prepare(`UPDATE chatbot_relays SET status = 'superseded' WHERE requester_phone = ? AND status = 'pending'`)
       .run(ctx.phoneNumber);
@@ -554,13 +597,7 @@ const confirmRelay: ChatbotTool = {
     const sender = findSender(ctx.phoneNumber, ctx.config.fyiSenders);
     if (!sender) return { ok: false, error: 'המספר הזה אינו מורשה. לא נשלח דבר.' };
 
-    const pending = ctx.db
-      .prepare(
-        `SELECT * FROM chatbot_relays
-         WHERE requester_phone = ? AND status = 'pending'
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(ctx.phoneNumber) as any;
+    const pending = pendingRelayInThisConversation(ctx);
 
     if (!pending) {
       return { ok: false, error: 'אין הודעה שממתינה לאישור. התחילי מחדש.' };
@@ -572,7 +609,9 @@ const confirmRelay: ChatbotTool = {
     if (conversationTurn(ctx) <= Number(pending.prepared_turn ?? 0)) {
       return {
         ok: false,
-        error: 'ההודעה עוד לא הוצגה לאישור. הציגי אותה קודם ובקשי אישור בהודעה נפרדת.',
+        error:
+          'ההודעה הוכנה בתור הזה ולכן עוד לא נראתה. בקשי את אישורה בשורה אחת, ' +
+          'ואל תכיני אותה מחדש — האישור שלה יטופל מעצמו.',
       };
     }
 
@@ -778,29 +817,36 @@ function latestUserMessage(ctx: WorkflowContext): string {
 }
 
 /**
- * The update waiting for this editor's answer, if it was shown in THIS
- * conversation. One left over from a conversation that has since gone stale is
- * not something a "מאשרת" today can be about, so it is retired instead.
+ * The message waiting for this requester's confirmation, if it was shown in
+ * THIS conversation. One left over from a conversation that has since gone
+ * stale is not what a "כן" today is about, so it is retired instead.
  */
-export function pendingInThisConversation(ctx: WorkflowContext) {
-  const pending = getPendingProposal(ctx.db, ctx.phoneNumber);
+export function pendingRelayInThisConversation(ctx: WorkflowContext): any | null {
+  const pending = ctx.db
+    .prepare(
+      `SELECT * FROM chatbot_relays
+       WHERE requester_phone = ? AND status = 'pending'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(ctx.phoneNumber) as any;
   if (!pending) return null;
-  if (pending.conversationId !== ctx.conversation.id) {
-    ctx.db.prepare(`UPDATE chatbot_knowledge_updates SET status='expired' WHERE id=?`).run(pending.id);
+  if (pending.conversation_id !== ctx.conversation.id) {
+    ctx.db.prepare(`UPDATE chatbot_relays SET status='expired' WHERE id=?`).run(pending.id);
     return null;
   }
   return pending;
 }
 
-const proposeKnowledgeUpdate: ChatbotTool = {
-  name: 'proposeKnowledgeUpdate',
+const recordKnowledgeUpdate: ChatbotTool = {
+  name: 'recordKnowledgeUpdate',
   description:
-    'Step 1 of updating the knowledge base, ONLY when her latest message IS new information. Takes no ' +
-    'input — it reads her latest message itself, so NEVER retype or summarise the information. It splits ' +
-    'it into items, compares each with the existing knowledge, and SENDS HER THE FULL PREVIEW DIRECTLY. ' +
-    'Nothing is changed yet. After it returns, reply with one short line asking her to approve or decide ' +
-    'per item — do not repeat the preview. NEVER call this for a reply to a preview ("מאשרת", "כן", ' +
-    '"בטל", "2 להשאיר") — that is applyKnowledgeUpdate.',
+    'Stores new information an authorised editor has just sent, straight away. Takes no input — it reads ' +
+    'her latest message itself, so NEVER retype, summarise or re-word the information. New facts are ' +
+    'added; a fact that conflicts with an existing one replaces it, because hers is the newer; identical ' +
+    'ones are left alone. It SENDS HER THE FULL REPORT of what went in, so after it returns write ONE ' +
+    'short line and do not repeat the report. NEVER call it for a reply to something you asked ' +
+    '("מאשרת", "כן", "תודה") — a reply is not information. If she says it was wrong, use ' +
+    'undoKnowledgeUpdate.',
   input_schema: { type: 'object', properties: {}, required: [] },
   execute: async (_input, ctx) => {
     const editor = findSender(ctx.phoneNumber, ctx.config.knowledgeEditors);
@@ -809,22 +855,15 @@ const proposeKnowledgeUpdate: ChatbotTool = {
     }
 
     const message = latestUserMessage(ctx);
-    const pending = pendingInThisConversation(ctx);
 
-    // The tool reads her latest message, so calling it on a reply turns the
-    // reply into the update: "תציע לי" and then "מאשרת" were each stored as
-    // knowledge, the second one replacing the real update she had just
-    // approved, over and over. A reply is never information.
-    const reply = classifyReply(message);
-    if (reply) {
+    // The tool reads her latest message, so calling it on a reply would store
+    // the reply: "תציע לי" and "מאשרת" each became a knowledge entry that way.
+    if (classifyReply(message)) {
       return {
         ok: false,
-        error: pending
-          ? 'ההודעה האחרונה שלה היא תשובה לתצוגה המקדימה, לא מידע חדש. אל תקראי ל-proposeKnowledgeUpdate. ' +
-            (reply === 'chatter'
-              ? 'שאלי אותה בשורה אחת אם לעדכן כפי שהוצג.'
-              : 'קראי ל-applyKnowledgeUpdate לפי תשובתה.')
-          : 'ההודעה האחרונה שלה היא תשובה ולא מידע חדש, ואין עדכון שממתין לאישור. בקשי ממנה לשלוח את המידע עצמו.',
+        error:
+          'ההודעה האחרונה שלה היא תשובה ולא מידע חדש, ולכן אין מה לשמור. ' +
+          'אם היא מבקשת לבטל — undoKnowledgeUpdate. אחרת עני לה בשורה אחת.',
       };
     }
 
@@ -832,10 +871,14 @@ const proposeKnowledgeUpdate: ChatbotTool = {
     if (!body) {
       return { ok: false, error: 'לא נמצא תוכן לעדכון. בקשי ממנה לשלוח את המידע עצמו.' };
     }
-    if (pending && extractUpdateBody(pending.sourceText) === body) {
+
+    // Already stored: the model can reach this twice for one message, and the
+    // information must not go in twice.
+    const last = getLastAppliedProposal(ctx.db, ctx.phoneNumber, ctx.conversation.id);
+    if (last && extractUpdateBody(last.sourceText) === body) {
       return {
         ok: false,
-        error: 'התצוגה המקדימה של המידע הזה כבר נשלחה אליה וממתינה לתשובתה. אל תשלחי אותה שוב — בקשי את אישורה.',
+        error: 'המידע הזה כבר נכנס למאגר והדיווח נשלח אליה. אל תשמרי שוב — ענייני בשורה אחת.',
       };
     }
 
@@ -855,20 +898,10 @@ const proposeKnowledgeUpdate: ChatbotTool = {
       .all() as ExistingEntry[];
     const proposed = proposeItems(items, existing);
 
-    // The preview is sent from here, built in code. Letting the model relay it
-    // would mean she approves a paraphrase of what will actually be written.
-    const preview = renderPreview(proposed);
-    for (const chunk of preview) {
-      await ctx.sendWhatsApp(ctx.phoneNumber, chunk);
-    }
+    // Her own defaults: new information goes in, conflicting information wins
+    // over what is there, identical information changes nothing.
+    const { actions } = resolveDecisions(proposed, [], true);
 
-    // And it goes into the conversation. Sent only from here, it was invisible
-    // on the next turn: the model saw its own "אפשר לאשר?" and no preview, and
-    // answered her "מאשרת" by proposing again.
-    new ConversationManager(ctx.db).appendTurn(ctx.conversation.id, { role: 'assistant', content: preview.join('\n\n') });
-
-    // Taken after the preview is recorded, so only a message she sends after
-    // this counts as her answer to it.
     createProposal(ctx.db, {
       conversationId: ctx.conversation.id,
       requesterPhone: ctx.phoneNumber,
@@ -877,93 +910,60 @@ const proposeKnowledgeUpdate: ChatbotTool = {
       items: proposed,
       preparedTurn: conversationTurn(ctx),
     });
+    const stored = getPendingProposal(ctx.db, ctx.phoneNumber);
+    if (!stored) {
+      return { ok: false, error: 'לא הצלחתי לשמור את העדכון. אפשר לנסות לשלוח אותו שוב.' };
+    }
 
-    const actionable = proposed.filter(p => p.kind !== 'unchanged').length;
+    const result = applyProposal(ctx.db, stored, actions, editor.name);
+    console.log(
+      `📚 Knowledge stored for ${editor.name}: +${result.added} ~${result.replaced} ` +
+      `(summaries ${result.summariesUpdated}) skipped ${result.skipped} stale ${result.stale.length}`,
+    );
+
+    // The report is built here and sent from here: she no longer approves
+    // anything in advance, so what she is told has to be what was written.
+    const report = renderStoredUpdate(proposed, actions, result);
+    for (const chunk of report) {
+      await ctx.sendWhatsApp(ctx.phoneNumber, chunk);
+    }
+    new ConversationManager(ctx.db).appendTurn(ctx.conversation.id, {
+      role: 'assistant',
+      content: report.join('\n\n'),
+    });
+
     return {
       ok: true,
       data: {
-        previewSent: true,
-        new: proposed.filter(p => p.kind === 'new').length,
-        changed: proposed.filter(p => p.kind === 'changed').length,
-        unchanged: proposed.filter(p => p.kind === 'unchanged').length,
-        note: actionable
-          ? 'התצוגה המקדימה נשלחה אליה. כתבי שורה קצרה אחת שמבקשת את אישורה. אל תחזרי על התוכן.'
-          : 'אין שינויים — הכל כבר קיים. אמרי לה זאת בקצרה.',
+        stored: true,
+        added: result.added,
+        replaced: result.replaced,
+        unchanged: proposed.filter(i => i.kind === 'unchanged').length,
+        stale: result.stale,
+        note: 'הדיווח המלא כבר נשלח אליה. כתבי שורה אחת קצרה בלבד, בלי לחזור על התוכן.',
       },
     };
   },
 };
 
-const applyKnowledgeUpdate: ChatbotTool = {
-  name: 'applyKnowledgeUpdate',
+const undoKnowledgeUpdate: ChatbotTool = {
+  name: 'undoKnowledgeUpdate',
   description:
-    'Step 2: applies the pending knowledge update according to the editor\'s reply. Call ONLY after she ' +
-    'answered the preview in a separate message. Map her words to actions per item number: ' +
-    'לגרוס/להחליף -> "replace", להשאיר -> "keep", להוסיף -> "add", לא להוסיף/לדלג -> "skip". ' +
-    'Set acceptDefaultsForRest=true when she approved ("מאשרת", "כן", "הכל") or gave per-item ' +
-    'instructions and did not ask to hold the rest. Set cancel=true if she wants to cancel.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      overrides: {
-        type: 'array',
-        description: 'Per-item decisions she stated explicitly',
-        items: {
-          type: 'object',
-          properties: {
-            item: { type: 'number' },
-            action: { type: 'string', enum: ['replace', 'keep', 'add', 'skip'] },
-          },
-          required: ['item', 'action'],
-        },
-      },
-      acceptDefaultsForRest: { type: 'boolean' },
-      cancel: { type: 'boolean' },
-    },
-    required: [],
-  },
-  execute: (input, ctx) => {
+    'Takes the last stored update back out, when the editor says it was wrong ("בטל", "תחזיר", ' +
+    '"זה לא נכון"). What was added is removed and what was overwritten gets its previous text back.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  execute: (_input, ctx) => {
     const editor = findSender(ctx.phoneNumber, ctx.config.knowledgeEditors);
     if (!editor) return { ok: false, error: 'המספר הזה אינו מורשה. לא שונה דבר.' };
 
-    const pending = pendingInThisConversation(ctx);
-    if (!pending) return { ok: false, error: 'אין עדכון שממתין לאישור. אפשר לשלוח "להלן מידע חדש" מחדש.' };
-
-    if (input.cancel === true) {
-      ctx.db.prepare(`UPDATE chatbot_knowledge_updates SET status='cancelled' WHERE id=?`).run(pending.id);
-      return { ok: true, data: { cancelled: true } };
+    const last = getLastAppliedProposal(ctx.db, ctx.phoneNumber, ctx.conversation.id);
+    if (!last) {
+      return { ok: false, error: 'לא מצאתי עדכון אחרון לבטל בשיחה הזו. אל תשני כלום במאגר.' };
     }
 
-    // She has to have actually seen the preview and replied to it.
-    if (conversationTurn(ctx) <= pending.preparedTurn) {
-      return { ok: false, error: 'העדכון עוד לא הוצג לאישור. יש להמתין לתשובתה.' };
-    }
-
-    const { actions, errors } = resolveDecisions(
-      pending.items,
-      Array.isArray(input.overrides) ? input.overrides : [],
-      input.acceptDefaultsForRest === true,
-    );
-    if (errors.length) {
-      return { ok: false, error: `לא ניתן להחיל עדיין: ${errors.join(' · ')}. שאלי אותה על מה שחסר.` };
-    }
-
-    const result = applyProposal(ctx.db, pending, actions, editor.name);
-    console.log(
-      `📚 Knowledge update by ${editor.name}: +${result.added} ~${result.replaced} (summaries ${result.summariesUpdated}) ` +
-      `kept ${result.kept} skipped ${result.skipped} stale ${result.stale.length}`,
-    );
-
-    return {
-      ok: true,
-      data: {
-        ...result,
-        note: result.stale.length
-          ? `פריטים ${result.stale.join(', ')} לא עודכנו כי המידע במאגר השתנה מאז התצוגה המקדימה. ` +
-            'אמרי לה זאת, והציעי לשלוח אותם שוב.'
-          : 'דווחי לה בקצרה כמה נוספו, כמה הוחלפו וכמה נשארו.',
-      },
-    };
+    const result = undoProposal(ctx.db, last);
+    console.log(`📚 Knowledge update undone for ${editor.name}: -${result.removed} ~${result.restored}`);
+    return { ok: true, data: { ...result, note: 'דווחי לה בשורה אחת שהוחזר.' } };
   },
 };
 
@@ -1259,8 +1259,8 @@ export const TOOLS: ChatbotTool[] = [
   confirmRelay,
   prepareGroupCreation,
   confirmGroupCreation,
-  proposeKnowledgeUpdate,
-  applyKnowledgeUpdate,
+  recordKnowledgeUpdate,
+  undoKnowledgeUpdate,
   getVehicleEntryFormat,
   searchGeneralKnowledge,
   searchOrders,
