@@ -25,6 +25,7 @@ import { WORKFLOW_BY_ID, toolsForWorkflow, workflowForIntent } from './workflows
 import { extractHebrewMonth, parseHebrewDate, parseHebrewTime } from './dateParser';
 import { isKnowledgeUpdate, classifyReply, isUndoRequest, renderUndoSummary } from './knowledgeUpdate';
 import { toLocalIsraeliPhone } from './phone';
+import { buildHistory, toModelTurns, unansweredUnitMessage } from './chatHistory';
 import { findSender } from './fyi';
 
 /** Guard against a tool-call loop burning tokens on a single message. */
@@ -141,7 +142,13 @@ export class ChatbotService {
     const client = new Anthropic({ apiKey: config.apiKey, timeout: 30_000, maxRetries: 1 });
 
     try {
-      const recentTurns = this.conversations.recentTurns(conversation.id, config.historyTurns);
+      const history = this.chatHistory(accountId, phoneNumber, conversation.id, config.historyTurns);
+      const recentTurns = toModelTurns(history);
+
+      // What she is answering, when the last thing sent to her did not come
+      // from the bot — a campaign, an announcement, a line someone typed in the
+      // app. Without this the bot greeted people who had just answered "1".
+      const answering = unansweredUnitMessage(history.slice(0, -1));
 
       // 1. Classify. Prior turns are included so a bare "12345678" is understood
       //    as the answer to the question the bot just asked.
@@ -185,10 +192,22 @@ export class ChatbotService {
         ? `שים לב: ${normalized.clarification} — שאל את המשתמש להבהרה לפני ביצוע פעולה.`
         : undefined;
 
+      // Someone answering a message the unit sent is not a stranger starting a
+      // conversation, even if the bot has never spoken to them before. Opening
+      // with "שלום, אני יחשונית, אני יכולה לעזור עם..." to a person who just
+      // replied "1" is what this whole change is about.
       const greeting =
-        isFirstContact && !workflow
+        isFirstContact && !workflow && !answering
           ? `זו ההודעה הראשונה מהמשתמש הזה. פתח בהצגה עצמית קצרה בנוסח הבא (אפשר לנסח מחדש בטבעיות): "${config.greeting}"`
           : undefined;
+
+      const replyingTo = answering
+        ? 'ההודעה האחרונה שלה היא תשובה להודעה הזו, שנשלחה אליה מהמערכת (קמפיין / הפצה / מישהו מהסגל):\n' +
+          `«${answering.content.slice(0, 600)}»\n` +
+          'תתייחסי לתשובה שלה בהקשר הזה. אל תפתחי בהצגה עצמית ואל תשאלי "במה אפשר לעזור" כאילו זו פנייה חדשה. ' +
+          'אם התשובה היא בחירה מתוך אפשרויות שהוצעו לה — אשרי קבלה בקצרה ובחום. ' +
+          'אל תאמרי שרשמת, שעדכנת או שהעברת הלאה, אלא אם באמת עשית זאת באחד הכלים.'
+        : undefined;
 
       // 4. Let the model converse, with only this workflow's tools available.
       const outbound: Array<{ to: string; message: string }> = [];
@@ -203,7 +222,7 @@ export class ChatbotService {
         now,
         deliver,
         outbound,
-        extraContext: [extra, greeting].filter(Boolean).join('\n\n') || undefined,
+        extraContext: [extra, replyingTo, greeting].filter(Boolean).join('\n\n') || undefined,
       });
 
       const finalReply = reply || 'לא בטוח שהבנתי בדיוק מה אתה צריך. תוכל להסביר לי במשפט אחד?';
@@ -287,6 +306,37 @@ export class ChatbotService {
       },
       now,
     };
+  }
+
+  /**
+   * The recent chat, as the bot should see it: its own turns plus everything
+   * else that passed through this WhatsApp chat.
+   *
+   * Falls back to the bot's own turns alone when the chat table has nothing —
+   * the simulator in the app writes no chat rows.
+   */
+  private chatHistory(accountId: string, phoneNumber: string, conversationId: string, limit: number) {
+    const botTurns = this.conversations.recentTurns(conversationId, limit);
+    let chatRows: any[] = [];
+    try {
+      const digits = phoneNumber.replace(/\D/g, '');
+      chatRows = this.db
+        .prepare(
+          `SELECT is_from_me, message_text, message_type, timestamp
+           FROM messages
+           WHERE account_id = ?
+             AND (from_number LIKE ? OR to_number LIKE ?)
+             AND COALESCE(is_warmup, 0) = 0
+           ORDER BY timestamp DESC, rowid DESC
+           LIMIT ?`,
+        )
+        .all(accountId, `%${digits}%`, `%${digits}%`, Math.max(limit * 2, 20));
+      chatRows.reverse();
+    } catch (error: any) {
+      // Losing the wider context is bad; refusing to answer is worse.
+      console.warn('💬 Could not read the chat history:', error?.message ?? error);
+    }
+    return buildHistory(chatRows, botTurns, limit);
   }
 
   /**
