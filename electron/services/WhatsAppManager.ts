@@ -1881,8 +1881,11 @@ export class WhatsAppManager {
           continue;
         }
         
-        console.error('⚠️ Failed after all retries');
-        throw new Error('WhatsApp Web is not ready. Please wait a moment and try again.');
+        // The real error, not a guess at its cause: reporting every failure as
+        // "WhatsApp Web is not ready" sent us looking at the connection while
+        // the send itself was what had broken.
+        console.error('⚠️ Failed after all retries:', lastError?.message ?? lastError);
+        throw new Error(`שליחת ההודעה נכשלה: ${lastError?.message ?? lastError}`);
       }
     }
     
@@ -1922,6 +1925,71 @@ export class WhatsAppManager {
     console.log('✅ Message saved to database');
   }
 
+  /**
+   * Makes sending an image work on the current WhatsApp Web build.
+   *
+   * whatsapp-web.js prepares the media and then spreads the result into the
+   * message object it hands WhatsApp. That used to be plain data; WhatsApp Web
+   * now returns a model instance, so the spread also copies the model's own
+   * internal fields — among them __x_id, which is where a model keeps its id.
+   * The message is then built carrying that id instead of its own message key,
+   * WhatsApp's sender lookup is handed undefined, and the send throws
+   * "Data passed to getter must include an id property". Text is unaffected
+   * because nothing is spread into it — which is why a campaign with an image
+   * failed on every contact on 18.10.2026 while text campaigns kept working,
+   * and why it looked like a connection problem.
+   *
+   * Handing the send plain data fixes it. Measured against the real account:
+   * the same image failed on five attempts before and sent immediately after,
+   * with text still working.
+   *
+   * Applied before each media send rather than once at startup, so a page
+   * reload cannot quietly leave it out. It costs one page call and does nothing
+   * when it is already in place.
+   */
+  private async ensureMediaSendPatch(accountId: string, client: Client): Promise<void> {
+    const page = (client as any).pupPage;
+    if (!page) return;
+
+    try {
+      const outcome = await page.evaluate(() => {
+        const w = window as any;
+        if (w.__yachashMediaPatch) return 'already applied';
+        const original = w.WWebJS?.processMediaData;
+        if (typeof original !== 'function') return 'processMediaData is missing';
+
+        w.WWebJS.processMediaData = async (...args: any[]) => {
+          const prepared = await original(...args);
+          if (!prepared || typeof prepared.toJSON !== 'function') return prepared;
+
+          const plain: any = { ...prepared.toJSON() };
+          if (plain.preview === undefined && prepared.preview !== undefined) plain.preview = prepared.preview;
+          if (plain.mediaHandle === undefined && prepared.mediaHandle !== undefined) plain.mediaHandle = prepared.mediaHandle;
+          // The message keeps its own id.
+          delete plain.id;
+          plain.toJSON = () => {
+            const copy = { ...plain };
+            delete copy.toJSON;
+            return copy;
+          };
+          return plain;
+        };
+
+        w.__yachashMediaPatch = true;
+        return 'applied';
+      });
+
+      if (outcome === 'applied') {
+        console.log(`🩹 Media send fix applied for ${accountId}`);
+      } else if (outcome !== 'already applied') {
+        console.warn(`🩹 Media send fix NOT applied for ${accountId}: ${outcome}`);
+      }
+    } catch (error: any) {
+      // Worth knowing about, but not worth refusing to try the send.
+      console.warn('🩹 Could not apply the media send fix:', error?.message ?? error);
+    }
+  }
+
   async sendMedia(accountId: string, to: string, filePath: string, caption?: string): Promise<void> {
     const client = this.clients.get(accountId);
     
@@ -1936,6 +2004,8 @@ export class WhatsAppManager {
     }
 
     console.log('📤 Sending media to:', to);
+
+    await this.ensureMediaSendPatch(accountId, client);
     
     const normalizedTarget = await this.normalizeSendTarget(accountId, to);
     let chatIdToSend = normalizedTarget.chatIdToSend;
@@ -1995,8 +2065,8 @@ export class WhatsAppManager {
           continue;
         }
         
-        console.error('⚠️ Failed after all retries');
-        throw new Error('WhatsApp Web is not ready. Please wait a moment and try again.');
+        console.error('⚠️ Failed after all retries:', lastError?.message ?? lastError);
+        throw new Error(`שליחת המדיה נכשלה: ${lastError?.message ?? lastError}`);
       }
     }
     
